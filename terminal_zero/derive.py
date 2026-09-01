@@ -53,6 +53,9 @@ def _index_to_base(series: list[float], base: float) -> list[float]:
 # The registry. Add a calculation here (with a version) rather than inlining
 # arithmetic anywhere else.
 DERIVATIONS: dict[str, Derivation] = {
+    "ratio": Derivation(
+        "ratio", "1.0.0", "ratio",
+        "numerator / denominator (generic share or multiple)", _ratio),
     "avg_annual_pay": Derivation(
         "avg_annual_pay", "1.0.0", "USD per worker",
         "total_annual_wages / annual_avg_emplvl", _ratio),

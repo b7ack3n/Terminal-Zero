@@ -1,17 +1,13 @@
-"""Render a room as a framework-structured industry analysis brief (HTML).
+"""Render a room as an editorial, framework-structured industry analysis (HTML).
 
-"A report is one rendering of a room." The brief is organised the way an
-analyst would structure it — industry sizing, key players, competitive forces
-(Porter's Five Forces), market constraints — and every figure is pulled from
-the store, never hand-typed.
+"A report is one rendering of a room." Organised the way an analyst builds it —
+market size, competitive structure, trade exposure, forces — as numbered
+Exhibits. Every figure is pulled from the store; nothing is hand-typed, and any
+computed number comes from a versioned derivation.
 
-Sections split into two kinds:
-  * DATA-BACKED (Industry sizing from QCEW, Key players from EDGAR): fully
-    cited, computed from observations / resolved entities.
-  * SCAFFOLD (Five Forces, Market constraints): the framework is laid out and
-    each force names the data that will drive it, marked clearly as pending —
-    we show the structure without fabricating analysis the data can't yet
-    support. The AI narrative and the extra sources fill these in later.
+Visual register: a light, print-like research report — serif display, grotesque
+body, a single deep-navy accent, generous white space. Deliberately not a
+dashboard.
 """
 
 from __future__ import annotations
@@ -19,6 +15,10 @@ from __future__ import annotations
 import sqlite3
 
 from terminal_zero import derive, geo, room
+from terminal_zero.census.cbp import SIZE_LABELS
+
+SIZE_ORDER = ["210", "220", "230", "241", "242", "251", "252", "254", "260"]
+LARGE_CODES = {"251", "252", "254", "260"}  # 250+ employees
 
 # ---- data assembly (all numbers come from the store) ---------------------
 
@@ -32,107 +32,113 @@ def _us_series(conn, subject_id):
                MAX(CASE WHEN concept='total_annual_wages' THEN value END) AS wages
         FROM observations WHERE subject_id=? AND geo='US'
         GROUP BY fiscal_year ORDER BY fiscal_year
-        """,
-        (subject_id,),
-    ).fetchall()
+        """, (subject_id,)).fetchall()
     return [dict(r) for r in rows]
 
 
 def _top_states(conn, subject_id, year, limit=8):
     rows = conn.execute(
-        """
-        SELECT geo, value FROM observations
-        WHERE subject_id=? AND fiscal_year=? AND concept='annual_avg_emplvl'
-          AND geo LIKE 'STATE:%'
-        ORDER BY value DESC LIMIT ?
-        """,
-        (subject_id, year, limit),
-    ).fetchall()
+        """SELECT geo, value FROM observations
+           WHERE subject_id=? AND fiscal_year=? AND concept='annual_avg_emplvl'
+             AND geo LIKE 'STATE:%' ORDER BY value DESC LIMIT ?""",
+        (subject_id, year, limit)).fetchall()
     return [{"label": geo.label(r["geo"]), "value": r["value"]} for r in rows]
+
+
+def _bea_output(conn, bea_industry):
+    if not bea_industry:
+        return []
+    return [dict(r) for r in conn.execute(
+        """SELECT fiscal_year AS year, value FROM observations
+           WHERE subject_id=? AND concept='gross_output' AND geo='US'
+           ORDER BY fiscal_year""", (f"BEA:{bea_industry}",)).fetchall()]
+
+
+def _cbp(conn, naics):
+    """Return CBP totals + establishment size distribution (latest year)."""
+    subj = f"NAICS:{naics}"
+    yr = conn.execute(
+        "SELECT MAX(fiscal_year) FROM observations WHERE subject_id=? AND source='census'",
+        (subj,)).fetchone()[0]
+    if yr is None:
+        return None
+    def val(concept):
+        r = conn.execute("SELECT value FROM observations WHERE subject_id=? AND concept=? "
+                         "AND fiscal_year=?", (subj, concept, yr)).fetchone()
+        return r[0] if r else None
+    dist = []
+    for code in SIZE_ORDER:
+        r = conn.execute("SELECT value FROM observations WHERE subject_id=? AND concept=? "
+                         "AND fiscal_year=?", (subj, f"cbp_estab_size:{code}", yr)).fetchone()
+        if r:
+            dist.append({"code": code, "label": SIZE_LABELS[code], "value": r[0]})
+    return {"year": yr, "estabs": val("cbp_establishments"),
+            "emp": val("cbp_employment"), "payroll": val("cbp_annual_payroll"),
+            "dist": dist}
+
+
+def _trade(conn, hs):
+    """Monthly exports/imports for an HS code, plus latest full-year totals."""
+    if not hs:
+        return None
+    subj = f"HS:{hs}"
+    rows = conn.execute(
+        """SELECT period_end, fiscal_year,
+                  MAX(CASE WHEN concept='exports_value' THEN value END) AS exp,
+                  MAX(CASE WHEN concept='imports_value' THEN value END) AS imp
+           FROM observations WHERE subject_id=?
+           GROUP BY period_end ORDER BY period_end""", (subj,)).fetchall()
+    months = [dict(r) for r in rows if r["exp"] is not None or r["imp"] is not None]
+    if not months:
+        return None
+    # latest full year = the most recent year with 12 months present
+    by_year = {}
+    for m in months:
+        by_year.setdefault(m["fiscal_year"], []).append(m)
+    full = [y for y, ms in by_year.items() if len(ms) >= 12]
+    year = max(full) if full else max(by_year)
+    exp_tot = sum(m["exp"] or 0 for m in by_year[year])
+    imp_tot = sum(m["imp"] or 0 for m in by_year[year])
+    return {"months": months, "year": year, "exports": exp_tot, "imports": imp_tot}
 
 
 def _provenance(conn, subject_id):
     row = conn.execute(
-        "SELECT MIN(retrieved_at) AS first, MAX(retrieved_at) AS last, "
-        "source, licence_class FROM observations WHERE subject_id=?",
-        (subject_id,),
-    ).fetchone()
+        "SELECT MIN(retrieved_at) AS first, MAX(retrieved_at) AS last, licence_class "
+        "FROM observations WHERE subject_id=?", (subject_id,)).fetchone()
     return dict(row) if row else {}
 
 
 # ---- formatting ----------------------------------------------------------
 
 def _int(v): return f"{v:,.0f}"
-def _usd_b(v): return f"${v / 1e9:,.1f}B"
+def _usd_b(v): return f"${v/1e9:,.1f}B"
+def _usd_b0(v): return f"${v/1e9:,.0f}B"
 
 
 def _pct(first, last):
-    if not first:
-        return "—"
-    return f"{(last - first) / first * 100:+.1f}%"
+    return "—" if not first else f"{(last-first)/first*100:+.1f}%"
 
 
-# ---- svg marks (computed from data) --------------------------------------
+# ---- svg marks -----------------------------------------------------------
 
 
 def _sparkline(values):
-    w, h, pad = 220, 56, 6
+    w, h, pad = 220, 46, 4
     lo, hi = min(values), max(values)
     span = (hi - lo) or 1
     n = len(values)
-    xs = [pad + (w - 2 * pad) * i / (n - 1) for i in range(n)]
-    ys = [h - pad - (h - 2 * pad) * (v - lo) / span for v in values]
+    xs = [pad + (w-2*pad)*i/(n-1) for i in range(n)]
+    ys = [h-pad - (h-2*pad)*(v-lo)/span for v in values]
     line = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
-    area = f"{xs[0]:.1f},{h - pad} " + line + f" {xs[-1]:.1f},{h - pad}"
-    return (
-        f'<svg class="spark" viewBox="0 0 {w} {h}" preserveAspectRatio="none" '
-        f'role="img" aria-hidden="true"><polygon class="spark-area" points="{area}"/>'
-        f'<polyline class="spark-line" points="{line}"/></svg>'
-    )
+    area = f"{xs[0]:.1f},{h-pad} " + line + f" {xs[-1]:.1f},{h-pad}"
+    return (f'<svg class="spark" viewBox="0 0 {w} {h}" preserveAspectRatio="none" aria-hidden="true">'
+            f'<polygon class="spark-area" points="{area}"/>'
+            f'<polyline class="spark-line" points="{line}"/></svg>')
 
 
-def _index_chart(years, series_map):
-    """Multi-series line chart, each series indexed to its first year = 100.
-
-    One shared scale (indexing solves the different-magnitude problem without a
-    forbidden dual axis). Series are distinguished by ink value + dash + a direct
-    end-label, so identity never rests on colour alone. Emphasis order matters:
-    the first series gets the accent.
-    """
-    w, h = 660, 300
-    ml, mr, mt, mb = 40, 104, 18, 32
-    pw, ph = w - ml - mr, h - mt - mb
-    indexed = {k: derive.apply("index_to_base", v, v[0]) for k, v in series_map.items()}
-    allv = [x for vs in indexed.values() for x in vs]
-    lo, hi = min(allv + [100]), max(allv)
-    pad = (hi - lo) * 0.12 or 8
-    ymin, ymax = lo - pad, hi + pad
-    n = len(years)
-
-    def X(i): return ml + pw * i / (n - 1)
-    def Y(v): return mt + ph * (1 - (v - ymin) / (ymax - ymin))
-
-    parts = [f'<svg class="idx" viewBox="0 0 {w} {h}" role="img">']
-    # baseline at index 100
-    y100 = Y(100)
-    parts.append(f'<line class="idx-base" x1="{ml}" y1="{y100:.1f}" x2="{ml + pw}" y2="{y100:.1f}"/>')
-    parts.append(f'<text class="idx-axis" x="{ml - 8}" y="{y100:.1f}" text-anchor="end" dominant-baseline="central">100</text>')
-    # x-axis year labels
-    for i, yr in enumerate(years):
-        parts.append(f'<text class="idx-axis" x="{X(i):.1f}" y="{h - 8}" text-anchor="middle">{yr}</text>')
-    # one line + end label per series
-    for cls, (name, vals) in enumerate(indexed.items()):
-        pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(vals))
-        parts.append(f'<polyline class="idx-line idx-{cls}" points="{pts}"/>')
-        ex, ey = X(n - 1), Y(vals[-1])
-        parts.append(f'<circle class="idx-dot idx-{cls}" cx="{ex:.1f}" cy="{ey:.1f}" r="3"/>')
-        parts.append(f'<text class="idx-end idx-{cls}t" x="{ex + 8:.1f}" y="{ey:.1f}" dominant-baseline="central">{name} {vals[-1]:.0f}</text>')
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-def _bars(rows):
-    w, barh, gap, labelw, valuew = 660, 28, 12, 150, 96
+def _hbars(rows, value_fmt=_int, unit=""):
+    w, barh, gap, labelw, valuew = 660, 26, 12, 168, 96
     trackx = labelw + 10
     trackw = w - trackx - valuew
     maxv = max(r["value"] for r in rows) or 1
@@ -143,124 +149,91 @@ def _bars(rows):
         bw = trackw * r["value"] / maxv
         mid = y + barh / 2
         parts.append(f'<text class="bar-label" x="{labelw}" y="{mid}" text-anchor="end" dominant-baseline="central">{r["label"]}</text>')
-        parts.append(f'<rect class="bar-track" x="{trackx}" y="{y}" width="{trackw}" height="{barh}" rx="4"/>')
-        parts.append(f'<rect class="bar" x="{trackx}" y="{y}" width="{bw:.1f}" height="{barh}" rx="4"><title>{r["label"]}: {_int(r["value"])} employees</title></rect>')
-        parts.append(f'<text class="bar-value" x="{trackx + bw + 8:.1f}" y="{mid}" dominant-baseline="central">{_int(r["value"])}</text>')
+        parts.append(f'<rect class="bar-track" x="{trackx}" y="{y}" width="{trackw}" height="{barh}"/>')
+        parts.append(f'<rect class="bar" x="{trackx}" y="{y}" width="{bw:.1f}" height="{barh}"><title>{r["label"]}: {value_fmt(r["value"])}{unit}</title></rect>')
+        parts.append(f'<text class="bar-value" x="{trackx+bw+8:.1f}" y="{mid}" dominant-baseline="central">{value_fmt(r["value"])}</text>')
     parts.append("</svg>")
     return "".join(parts)
 
 
-# ---- section builders ----------------------------------------------------
+def _index_chart(years, series_map):
+    w, h, ml, mr, mt, mb = 660, 300, 40, 132, 18, 32
+    pw, ph = w-ml-mr, h-mt-mb
+    indexed = {k: derive.apply("index_to_base", v, v[0]) for k, v in series_map.items()}
+    allv = [x for vs in indexed.values() for x in vs]
+    lo, hi = min(allv+[100]), max(allv)
+    pad = (hi-lo)*0.12 or 8
+    ymin, ymax = lo-pad, hi+pad
+    n = len(years)
+    X = lambda i: ml + pw*i/(n-1)
+    Y = lambda v: mt + ph*(1-(v-ymin)/(ymax-ymin))
+    p = [f'<svg class="idx" viewBox="0 0 {w} {h}" role="img">']
+    y100 = Y(100)
+    p.append(f'<line class="grid" x1="{ml}" y1="{y100:.1f}" x2="{ml+pw}" y2="{y100:.1f}"/>')
+    p.append(f'<text class="axis" x="{ml-8}" y="{y100:.1f}" text-anchor="end" dominant-baseline="central">100</text>')
+    for i, yr in enumerate(years):
+        p.append(f'<text class="axis" x="{X(i):.1f}" y="{h-8}" text-anchor="middle">{yr}</text>')
+    for cls, (name, vals) in enumerate(indexed.items()):
+        pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(vals))
+        p.append(f'<polyline class="line s{cls}" points="{pts}"/>')
+        ex, ey = X(n-1), Y(vals[-1])
+        p.append(f'<circle class="dot s{cls}" cx="{ex:.1f}" cy="{ey:.1f}" r="3"/>')
+        p.append(f'<text class="end s{cls}t" x="{ex+8:.1f}" y="{ey:.1f}" dominant-baseline="central">{name} {vals[-1]:.0f}</text>')
+    p.append("</svg>")
+    return "".join(p)
 
 
-def _section_head(num, title):
-    return f'<div class="sect-head"><span class="sect-num">{num}</span><h2>{title}</h2></div>'
+def _trade_chart(months):
+    w, h, ml, mr, mt, mb = 660, 300, 52, 96, 16, 30
+    pw, ph = w-ml-mr, h-mt-mb
+    exp = [m["exp"] or 0 for m in months]
+    imp = [m["imp"] or 0 for m in months]
+    n = len(months)
+    hi = max(exp+imp) or 1
+    X = lambda i: ml + pw*i/(max(n-1, 1))
+    Y = lambda v: mt + ph*(1-v/(hi*1.08))
+    p = [f'<svg class="idx" viewBox="0 0 {w} {h}" role="img">']
+    # y gridlines in $B
+    import math
+    step = max(1, math.ceil((hi/1e9)/4))
+    g = 0
+    while g*1e9 <= hi:
+        yy = Y(g*1e9)
+        p.append(f'<line class="grid" x1="{ml}" y1="{yy:.1f}" x2="{ml+pw}" y2="{yy:.1f}"/>')
+        p.append(f'<text class="axis" x="{ml-8}" y="{yy:.1f}" text-anchor="end" dominant-baseline="central">${g}B</text>')
+        g += step
+    # x labels at year starts
+    seen = set()
+    for i, m in enumerate(months):
+        yr = m["fiscal_year"]
+        if yr not in seen:
+            seen.add(yr)
+            p.append(f'<text class="axis" x="{X(i):.1f}" y="{h-6}" text-anchor="middle">{yr}</text>')
+    for cls, series in enumerate((imp, exp)):        # imports first (usually higher)
+        pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(series))
+        p.append(f'<polyline class="line s{cls}" points="{pts}"/>')
+    name = {0: "Imports", 1: "Exports"}
+    for cls, series in enumerate((imp, exp)):
+        ex, ey = X(n-1), Y(series[-1])
+        p.append(f'<circle class="dot s{cls}" cx="{ex:.1f}" cy="{ey:.1f}" r="3"/>')
+        p.append(f'<text class="end s{cls}t" x="{ex+8:.1f}" y="{ey:.1f}" dominant-baseline="central">{name[cls]}</text>')
+    p.append("</svg>")
+    return "".join(p)
 
 
-def _market_size_banner(conn, bea_industry, bea_note):
-    """Market-size banner from BEA gross output, or an honest pending state."""
-    rows = []
-    if bea_industry:
-        rows = conn.execute(
-            "SELECT fiscal_year, value FROM observations WHERE subject_id=? "
-            "AND concept='gross_output' AND geo='US' ORDER BY fiscal_year",
-            (f"BEA:{bea_industry}",),
-        ).fetchall()
-    if not rows:
-        return (
-            '<div class="marketsize">'
-            '<span class="ms-k">Market size · gross output</span>'
-            '<span class="ms-v">Pending</span>'
-            '<span class="pending">Add a BEA key to source this (BEA gross output by industry)</span>'
-            "</div>"
-        )
-    first, last = rows[0], rows[-1]
-    y0, y1 = first["fiscal_year"], last["fiscal_year"]
-    cagr = derive.apply("cagr", first["value"], last["value"], max(y1 - y0, 1))
-    return (
-        '<div class="marketsize done">'
-        '<div class="ms-main">'
-        f'<span class="ms-k">Market size · gross output · {y1}</span>'
-        f'<span class="ms-big">${last["value"] / 1e9:,.0f}B</span>'
-        f'<span class="ms-chg">{cagr:+.1%}/yr since {y0}</span>'
-        "</div>"
-        f'<p class="ms-note">{bea_note} Source: BEA GDP-by-Industry (gross output).</p>'
-        "</div>"
-    )
+# ---- structural helpers --------------------------------------------------
 
 
-def _key_players_section(num, key_players):
-    body = ""
-    if not key_players or not key_players.get("players"):
-        body = (
-            '<p class="empty">No public companies are classified in this industry '
-            "under EDGAR — a sign the industry is largely private. Coverage of "
-            "private players comes from the sizing sources, not company filings.</p>"
-        )
-        cite = ""
-    else:
-        players = sorted(key_players["players"], key=lambda p: (p["name"] or ""))
-        shown = players[:15]
-        rows = "".join(
-            f'<tr><td class="tk">{p["ticker"] or "—"}</td><td>{p["name"]}</td>'
-            f'<td class="ck">CIK{p["cik"]}</td></tr>'
-            for p in shown
-        )
-        body = (
-            '<table class="players"><thead><tr><th>Ticker</th><th>Company</th>'
-            '<th>Filer</th></tr></thead><tbody>' + rows + "</tbody></table>"
-        )
-        total = key_players["total_named"]
-        more = f" Showing 15 of {total} public filers with identifiable tickers." if total > 15 else ""
-        body += (
-            f'<p class="cap">Public companies classified in SIC {key_players["sic"]} '
-            f"(EDGAR).{more} Ranking by revenue is a pending enrichment.</p>"
-        )
-        cite = key_players
-    return f'<section>{_section_head(num, "Key players")}{body}</section>', cite
+def _section(num, title, lede=""):
+    lede_html = f'<p class="lede">{lede}</p>' if lede else ""
+    return (f'<div class="sect-head"><span class="sect-no">{num}</span>'
+            f'<h2>{title}</h2></div>{lede_html}')
 
 
-FORCES = [
-    ("Competitive rivalry",
-     "Number of players and market concentration — establishment counts (QCEW/CBP) and size distribution (CBP)."),
-    ("Threat of new entrants",
-     "Capital intensity and establishment birth/death rates (Census Business Formation Statistics)."),
-    ("Threat of substitutes",
-     "Output and pricing of adjacent industries (BEA industry accounts, trade)."),
-    ("Supplier power",
-     "Upstream input costs and concentration (BEA input-output, trade in components)."),
-    ("Buyer power",
-     "Downstream demand concentration and export dependence (Census / USITC trade)."),
-]
-
-
-def _forces_section(num):
-    cards = "".join(
-        f'<div class="force"><span class="force-k">{name}</span>'
-        f"<p>{driver}</p><span class=\"pending\">Awaiting data + AI analysis</span></div>"
-        for name, driver in FORCES
-    )
-    return (
-        f'<section>{_section_head(num, "Competitive forces")}'
-        '<p class="sect-lede">Porter\'s Five Forces. Each force names the data that '
-        "will drive it; the analysis is written by the model over that data, with "
-        'every figure cited.</p>'
-        f'<div class="forces">{cards}</div></section>'
-    )
-
-
-def _constraints_section(num):
-    items = [
-        ("Trade exposure", "Import penetration and export dependence (Census / USITC trade, by HS code)."),
-        ("Input sensitivity", "Cost and availability of key inputs (BEA input-output)."),
-        ("Labor availability", "Employment levels, wages, and geographic concentration (QCEW — partially available)."),
-    ]
-    rows = "".join(
-        f'<div class="force"><span class="force-k">{k}</span><p>{v}</p>'
-        '<span class="pending">Awaiting data + AI analysis</span></div>'
-        for k, v in items
-    )
-    return f'<section>{_section_head(num, "Market constraints")}<div class="forces">{rows}</div></section>'
+def _exhibit(num, title, body, source):
+    return (f'<figure class="exhibit"><figcaption><span class="ex-no">Exhibit {num}</span>'
+            f'<span class="ex-title">{title}</span></figcaption>{body}'
+            f'<p class="ex-src">{source}</p></figure>')
 
 
 # ---- styles --------------------------------------------------------------
@@ -268,244 +241,302 @@ def _constraints_section(num):
 STYLE = """
 <style>
 :root{
-  --bg:#F5F7FA; --surface:#FFFFFF; --ink:#14181F; --muted:#5B6673;
-  --faint:#8A94A2; --line:#E3E8EF; --track:#EDF1F6;
-  --accent:#0E7C86; --accent-ink:#0B5F67; --accent-fill:rgba(14,124,134,.14);
-  --pending:#B06A17; --pending-bg:rgba(176,106,23,.10);
+  --paper:#FFFFFF; --ground:#F5F6F8; --ink:#16191D; --muted:#586069;
+  --faint:#8A9099; --rule:#E3E6EA; --accent:#123E63; --accent-dk:#0B2A45;
+  --accent-2:#2B6CA3; --accent-soft:rgba(18,62,99,.09); --neg:#9A3B34;
 }
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme="light"]){
-    --bg:#0C0F14; --surface:#12161D; --ink:#E7ECF3; --muted:#9BA6B4;
-    --faint:#6B7686; --line:#232A34; --track:#1B2129;
-    --accent:#3FB6C4; --accent-ink:#7FD4DE; --accent-fill:rgba(63,182,196,.16);
-    --pending:#E0A85B; --pending-bg:rgba(224,168,91,.12);
-  }
-}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#141821; --ground:#1B2029; --ink:#E7EAEF; --muted:#9AA2AD;
+  --faint:#6C7580; --rule:#262D37; --accent:#7FB0DC; --accent-dk:#A9CCE6;
+  --accent-2:#5C93C4; --accent-soft:rgba(127,176,220,.13); --neg:#D08A82;
+}}
 :root[data-theme="dark"]{
-  --bg:#0C0F14; --surface:#12161D; --ink:#E7ECF3; --muted:#9BA6B4;
-  --faint:#6B7686; --line:#232A34; --track:#1B2129;
-  --accent:#3FB6C4; --accent-ink:#7FD4DE; --accent-fill:rgba(63,182,196,.16);
-  --pending:#E0A85B; --pending-bg:rgba(224,168,91,.12);
+  --paper:#141821; --ground:#1B2029; --ink:#E7EAEF; --muted:#9AA2AD;
+  --faint:#6C7580; --rule:#262D37; --accent:#7FB0DC; --accent-dk:#A9CCE6;
+  --accent-2:#5C93C4; --accent-soft:rgba(127,176,220,.13); --neg:#D08A82;
 }
 *{box-sizing:border-box}
-body{background:var(--bg);color:var(--ink);
-  font-family:"IBM Plex Sans",system-ui,sans-serif;line-height:1.55;
-  -webkit-font-smoothing:antialiased}
-.wrap{max-width:900px;margin:0 auto;padding:56px 28px 80px}
-.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.22em;
-  text-transform:uppercase;color:var(--accent-ink);margin:0 0 14px}
-h1{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;
-  font-size:clamp(2rem,4.2vw,2.9rem);line-height:1.08;letter-spacing:-.01em;
-  text-wrap:balance;margin:0 0 12px}
-.dek{color:var(--muted);font-size:1.05rem;max-width:60ch;margin:0}
-.masthead{border-bottom:1px solid var(--line);padding-bottom:26px}
-.coverage{font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--faint);
-  margin-top:18px;display:flex;flex-wrap:wrap;gap:6px 22px}
-.coverage b{color:var(--muted);font-weight:500}
-section{margin-top:52px}
-.sect-head{display:flex;align-items:baseline;gap:14px;margin:0 0 8px;
-  padding-bottom:14px;border-bottom:1px solid var(--line)}
-.sect-num{font-family:"IBM Plex Mono",monospace;font-size:.9rem;color:var(--accent-ink);
+body{background:var(--paper);color:var(--ink);
+  font-family:"Libre Franklin",system-ui,-apple-system,sans-serif;
+  line-height:1.6;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+.paper{max-width:820px;margin:0 auto;padding:64px 32px 96px}
+.serif{font-family:"Newsreader",Georgia,serif}
+/* cover */
+.eyebrow{font-size:.7rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--accent);margin:0 0 20px}
+h1{font-family:"Newsreader",Georgia,serif;font-weight:500;
+  font-size:clamp(2.2rem,5vw,3.3rem);line-height:1.05;letter-spacing:-.01em;
+  text-wrap:balance;margin:0 0 18px}
+.standfirst{font-family:"Newsreader",Georgia,serif;font-size:1.3rem;line-height:1.45;
+  color:var(--muted);max-width:34ch;margin:0 0 28px;font-weight:400}
+.meta{display:flex;flex-wrap:wrap;gap:6px 28px;padding-top:22px;border-top:1px solid var(--ink);
+  font-size:.82rem;color:var(--muted)}
+.meta b{color:var(--ink);font-weight:600}
+.asof{color:var(--accent);font-weight:600}
+/* sections */
+section{margin-top:64px}
+.sect-head{display:flex;align-items:baseline;gap:16px;margin:0 0 4px;
+  padding-bottom:16px;border-bottom:2px solid var(--accent)}
+.sect-no{font-family:"Newsreader",Georgia,serif;font-size:1.4rem;color:var(--accent);
   font-weight:500}
-.sect-head h2{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;
-  font-size:1.5rem;margin:0;letter-spacing:-.01em}
-.sect-lede{color:var(--muted);max-width:64ch;margin:16px 0 22px}
-.label{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--faint);margin:22px 0 16px}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(172px,1fr));gap:16px}
-@media(max-width:680px){.tiles{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}}
-.marketsize{display:flex;align-items:baseline;gap:14px 20px;flex-wrap:wrap;
-  background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);
-  border-radius:10px;padding:18px 22px;margin-bottom:20px}
-.marketsize .ms-k{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.12em;
-  text-transform:uppercase;color:var(--muted)}
-.marketsize .ms-v{font-family:"IBM Plex Serif",Georgia,serif;font-size:1.3rem;font-weight:600;
-  color:var(--faint)}
-.marketsize.done{flex-direction:column;align-items:flex-start;gap:8px}
-.ms-main{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
-.ms-big{font-family:"IBM Plex Serif",Georgia,serif;font-size:2rem;font-weight:600;
-  color:var(--ink);letter-spacing:-.01em;font-variant-numeric:tabular-nums}
-.ms-chg{font-family:"IBM Plex Mono",monospace;font-size:.85rem;color:var(--accent-ink);
-  font-variant-numeric:tabular-nums}
-.ms-note{margin:0;color:var(--muted);font-size:.82rem;max-width:72ch}
-.idx{display:block;width:100%;height:auto;margin-top:4px}
-.idx-base{stroke:var(--line);stroke-width:1;stroke-dasharray:2 3}
-.idx-axis{font-family:"IBM Plex Mono",monospace;font-size:11px;fill:var(--faint)}
-.idx-line{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.idx-0{stroke:var(--accent)} .idx-1{stroke:var(--muted)}
-.idx-2{stroke:var(--faint);stroke-dasharray:5 3}
-.idx-dot.idx-0{fill:var(--accent)} .idx-dot.idx-1{fill:var(--muted)} .idx-dot.idx-2{fill:var(--faint)}
-.idx-end{font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-variant-numeric:tabular-nums}
-.idx-0t{fill:var(--accent-ink)} .idx-1t{fill:var(--muted)} .idx-2t{fill:var(--faint)}
-.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  padding:20px 20px 14px;display:flex;flex-direction:column;gap:2px}
-.tile .k{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.12em;
-  text-transform:uppercase;color:var(--muted)}
-.tile .v{font-family:"IBM Plex Mono",monospace;font-size:1.7rem;font-weight:600;
-  font-variant-numeric:tabular-nums;letter-spacing:-.01em;margin-top:4px}
-.tile .chg{font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--accent-ink);
-  font-variant-numeric:tabular-nums}
-.spark{display:block;width:100%;height:58px;margin-top:14px}
-.spark-area{fill:var(--accent-fill)}
-.spark-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linecap:round;
-  stroke-linejoin:round;vector-effect:non-scaling-stroke}
-.chartcard{background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  padding:24px}
-.bars{width:100%;height:auto}
-.bar-track{fill:var(--track)}
+.sect-head h2{font-family:"Newsreader",Georgia,serif;font-weight:500;font-size:1.9rem;
+  margin:0;letter-spacing:-.01em}
+.lede{font-size:1.05rem;color:var(--muted);max-width:62ch;margin:18px 0 0}
+/* market-size headline */
+.headline{margin:28px 0 8px;padding:26px 0;border-top:1px solid var(--rule);
+  border-bottom:1px solid var(--rule)}
+.headline .k{font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted)}
+.headline .big{font-family:"Newsreader",Georgia,serif;font-size:3rem;font-weight:500;
+  line-height:1;letter-spacing:-.02em;margin:8px 0 6px;display:flex;align-items:baseline;gap:16px}
+.headline .chg{font-family:"Libre Franklin",sans-serif;font-size:1rem;color:var(--accent);font-weight:600}
+.headline .note{color:var(--muted);font-size:.86rem;max-width:70ch;margin:0}
+/* key figures band */
+.figband{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  margin:34px 0;border-top:1px solid var(--rule)}
+.fig{padding:20px 20px 20px 0;border-bottom:1px solid var(--rule)}
+.fig .k{font-size:.68rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.fig .v{font-family:"Newsreader",Georgia,serif;font-size:1.7rem;font-weight:500;margin:6px 0 2px;letter-spacing:-.01em}
+.fig .c{font-size:.8rem;color:var(--accent);font-weight:600}
+.spark{display:block;width:100%;height:40px;margin-top:12px}
+.spark-area{fill:var(--accent-soft)}
+.spark-line{fill:none;stroke:var(--accent);stroke-width:1.5;vector-effect:non-scaling-stroke}
+/* exhibits */
+.exhibit{margin:32px 0 0;padding:0}
+.exhibit figcaption{display:flex;align-items:baseline;gap:12px;margin-bottom:18px}
+.ex-no{font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
+.ex-title{font-weight:600;font-size:1rem}
+.ex-src{font-size:.74rem;color:var(--faint);margin:14px 0 0;padding-top:10px;border-top:1px solid var(--rule)}
+.bars,.idx{width:100%;height:auto;display:block}
+.bar-track{fill:var(--ground)}
 .bar{fill:var(--accent)}
-.bar-label{font-family:"IBM Plex Sans",sans-serif;font-size:13px;fill:var(--ink)}
-.bar-value{font-family:"IBM Plex Mono",monospace;font-size:12.5px;fill:var(--muted);
-  font-variant-numeric:tabular-nums}
-.cap{font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--faint);
-  margin:16px 0 0}
-.players{width:100%;border-collapse:collapse;font-size:.92rem}
-.players th{text-align:left;font-family:"IBM Plex Mono",monospace;font-size:.7rem;
-  letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:500;
-  padding:0 0 10px;border-bottom:1px solid var(--line)}
-.players td{padding:11px 0;border-bottom:1px solid var(--line)}
-.players .tk{font-family:"IBM Plex Mono",monospace;color:var(--accent-ink);font-weight:500}
-.players .ck{font-family:"IBM Plex Mono",monospace;color:var(--faint);font-size:.78rem}
+.bar-label{font-family:"Libre Franklin",sans-serif;font-size:13px;fill:var(--ink)}
+.bar-value{font-family:"Libre Franklin",sans-serif;font-size:12.5px;fill:var(--muted)}
+.grid{stroke:var(--rule);stroke-width:1}
+.axis{font-family:"Libre Franklin",sans-serif;font-size:11px;fill:var(--faint)}
+.line{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.s0{stroke:var(--accent)} .s1{stroke:var(--accent-2);stroke-dasharray:0}
+.dot.s0{fill:var(--accent)} .dot.s1{fill:var(--accent-2)}
+.end{font-size:11.5px;font-weight:600} .s0t{fill:var(--accent)} .s1t{fill:var(--accent-2)}
+/* finding callout */
+.finding{font-family:"Newsreader",Georgia,serif;font-size:1.25rem;line-height:1.5;
+  color:var(--ink);border-left:3px solid var(--accent);padding:4px 0 4px 22px;margin:28px 0}
+.finding b{font-weight:600}
+/* key players table */
+.players{width:100%;border-collapse:collapse;font-size:.92rem;margin-top:4px}
+.players th{text-align:left;font-size:.68rem;font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--faint);padding:0 0 10px;border-bottom:1px solid var(--ink)}
+.players td{padding:11px 0;border-bottom:1px solid var(--rule)}
+.players .tk{font-weight:600;color:var(--accent)}
+.players .ck{color:var(--faint);font-size:.78rem}
 .empty{color:var(--muted);max-width:60ch}
-.forces{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:22px}
-@media(max-width:680px){.forces{grid-template-columns:1fr}}
-.force{background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  padding:18px 18px 16px;display:flex;flex-direction:column;gap:8px}
-.force-k{font-family:"IBM Plex Sans",sans-serif;font-weight:600;font-size:1rem}
-.force p{margin:0;color:var(--muted);font-size:.88rem;flex:1}
-.pending{align-self:flex-start;font-family:"IBM Plex Mono",monospace;font-size:.66rem;
-  letter-spacing:.06em;text-transform:uppercase;color:var(--pending);
-  background:var(--pending-bg);padding:4px 8px;border-radius:5px}
-.prov{background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  padding:22px 24px}
-.prov h3{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--faint);margin:0 0 14px;font-weight:500}
-.prov dl{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:0}
-.prov dt{font-family:"IBM Plex Mono",monospace;color:var(--faint);font-size:.78rem}
-.prov dd{margin:0;font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--ink);
-  word-break:break-all}
-.foot{margin-top:44px;padding-top:20px;border-top:1px solid var(--line);
-  font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--faint);
-  display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+/* forces */
+.forces{border-top:1px solid var(--rule);margin-top:24px}
+.frow{display:grid;grid-template-columns:200px 1fr auto;gap:18px;align-items:baseline;
+  padding:18px 0;border-bottom:1px solid var(--rule)}
+@media(max-width:640px){.frow{grid-template-columns:1fr}}
+.frow .fk{font-weight:600;font-size:1rem}
+.frow p{margin:0;color:var(--muted);font-size:.9rem}
+.tag{font-size:.66rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--faint);white-space:nowrap}
+.tag.live{color:var(--accent)}
+/* provenance */
+.prov{margin-top:20px}
+.prov dl{display:grid;grid-template-columns:auto 1fr;gap:10px 22px;margin:0;font-size:.82rem}
+.prov dt{color:var(--faint);font-weight:600}
+.prov dd{margin:0;color:var(--ink);word-break:break-word}
+.foot{margin-top:56px;padding-top:20px;border-top:2px solid var(--accent);
+  font-size:.76rem;color:var(--faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
 </style>
 """
 
 
-def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None,
-           bea_industry=None, bea_note="") -> str:
+def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
+           hs=None, hs_note="") -> str:
     subject = f"NAICS:{naics}"
     series = _us_series(conn, subject)
     if not series:
         raise ValueError(f"no observations for {subject} — load data first")
     first, last = series[0], series[-1]
     y0, y1 = first["year"], last["year"]
-    top = _top_states(conn, subject, y1)
-    prov = _provenance(conn, subject)
-    cov = room.summary(conn, room.RoomDefinition(name="_", subject_ids=[subject]))
-
-    # Series for each measure, plus two derived series (all via the registry).
     estabs = [s["estabs"] for s in series]
     emp = [s["emp"] for s in series]
     wages = [s["wages"] for s in series]
     pay = [derive.apply("avg_annual_pay", s["wages"], s["emp"]) for s in series]
     size = [derive.apply("avg_establishment_size", s["emp"], s["estabs"]) for s in series]
     n_years = max(y1 - y0, 1)
+    cagr = lambda v: f"{derive.apply('cagr', v[0], v[-1], n_years):+.1%}/yr"
 
-    def cagr_label(vals):
-        return f"{derive.apply('cagr', vals[0], vals[-1], n_years):+.1%}/yr"
-
-    tiles = [
-        ("Establishments", _int(estabs[-1]), cagr_label(estabs), _sparkline(estabs)),
-        ("Employment", _int(emp[-1]), cagr_label(emp), _sparkline(emp)),
-        ("Total annual wages", _usd_b(wages[-1]), cagr_label(wages), _sparkline(wages)),
-        ("Avg pay / worker", f"${_int(pay[-1])}", cagr_label(pay), _sparkline(pay)),
-        ("Workers / establishment", f"{size[-1]:.0f}", cagr_label(size), _sparkline(size)),
-    ]
-    tiles_html = "".join(
-        f'<div class="tile"><span class="k">{k}</span><span class="v">{v}</span>'
-        f'<span class="chg">{chg} · since {y0}</span>{spark}</div>'
-        for k, v, chg, spark in tiles
-    )
-    index_chart = _index_chart(
-        [s["year"] for s in series],
-        {"Wages": wages, "Establishments": estabs, "Employment": emp},
-    )
-
-    players_section, players_cite = _key_players_section("II", key_players)
-    has_bea = bool(bea_industry and conn.execute(
-        "SELECT 1 FROM observations WHERE subject_id=? AND concept='gross_output' LIMIT 1",
-        (f"BEA:{bea_industry}",)).fetchone())
+    bea = _bea_output(conn, bea_industry)
+    cbp = _cbp(conn, naics)
+    trade = _trade(conn, hs)
+    prov = _provenance(conn, subject)
     retrieved = (prov.get("last") or "")[:10]
 
-    # Provenance rows — list every source the brief actually drew on.
-    prov_rows = [
-        ("Sizing source", f"{prov.get('source', '')} · Quarterly Census of Employment and Wages"),
-        ("Sizing endpoint", f"https://data.bls.gov/cew/data/api/&lt;year&gt;/a/industry/{naics}.csv"),
+    # ---- cover meta / freshness -----------------------------------------
+    vintages = [f"QCEW {y1}"]
+    if bea:
+        vintages.append(f"BEA {bea[-1]['year']}")
+    if cbp:
+        vintages.append(f"CBP {cbp['year']}")
+    if trade:
+        latest_month = trade["months"][-1]["period_end"][:7]
+        vintages.append(f"Trade {latest_month}")
+
+    # ---- Section 1: market size & growth --------------------------------
+    if bea:
+        bf, bl = bea[0], bea[-1]
+        bcagr = derive.apply("cagr", bf["value"], bl["value"], max(bl["year"]-bf["year"], 1))
+        headline = (
+            '<div class="headline"><div class="k">Market size · sector gross output · '
+            f'{bl["year"]}</div><div class="big serif">{_usd_b0(bl["value"])}'
+            f'<span class="chg">{bcagr:+.1%}/yr since {bf["year"]}</span></div>'
+            f'<p class="note">{bea_note} Source: BEA GDP-by-Industry.</p></div>')
+    else:
+        headline = ('<div class="headline"><div class="k">Market size</div>'
+                    '<div class="big serif">—</div><p class="note">BEA source not loaded.</p></div>')
+
+    figs = [
+        ("Establishments", _int(estabs[-1]), cagr(estabs), _sparkline(estabs)),
+        ("Employment", _int(emp[-1]), cagr(emp), _sparkline(emp)),
+        ("Total wages", _usd_b(wages[-1]), cagr(wages), _sparkline(wages)),
+        ("Avg pay / worker", f"${_int(pay[-1])}", cagr(pay), _sparkline(pay)),
+        ("Workers / estab.", f"{size[-1]:.0f}", cagr(size), _sparkline(size)),
     ]
-    if players_cite:
-        prov_rows.append(("Key players source", "sec-edgar · company classification by SIC"))
-        prov_rows.append(("Key players endpoint", f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&SIC={players_cite['sic']}"))
-    if has_bea:
-        prov_rows.append(("Market size source", "bea · GDP-by-Industry, gross output (TableID 15)"))
-        prov_rows.append(("Market size endpoint", "https://apps.bea.gov/api/data/?method=GetData&datasetname=GDPbyIndustry&TableID=15"))
-    prov_rows += [
-        ("Licence", prov.get("licence_class", "")),
-        ("Retrieved", retrieved),
-        ("Scope", "Private ownership; U.S. + states; suppressed cells omitted"),
+    figband = '<div class="figband">' + "".join(
+        f'<div class="fig"><div class="k">{k}</div><div class="v">{v}</div>'
+        f'<div class="c">{c} since {y0}</div>{sp}</div>' for k, v, c, sp in figs) + "</div>"
+
+    ex_index = _exhibit(1, f"Indexed growth, {y0}–{y1} ({y0} = 100)",
+                        _index_chart([s["year"] for s in series],
+                                     {"Wages": wages, "Estab.": estabs, "Employ.": emp}),
+                        f"BLS QCEW; growth via derivation cagr/index_to_base v1.0.0. "
+                        f"Wages rising faster than employment ⇒ pay per worker climbing.")
+    ex_geo = _exhibit(2, f"Employment by state, {y1}",
+                      _hbars(_top_states(conn, subject, y1), _int, " employees"),
+                      "BLS QCEW, private ownership. Top 8 states.")
+
+    section1 = ("<section>" + _section("01", "Market size & growth",
+                "How large the industry is, and how fast it is moving. Sector output "
+                "from BEA; employment, wages and establishments from the QCEW near-census "
+                "of covered employers.") + headline + figband + ex_index + ex_geo + "</section>")
+
+    # ---- Section 2: competitive structure -------------------------------
+    struct_parts = [_section("02", "Competitive structure",
+                    "The shape of competition — how many firms, and how concentrated. "
+                    "Establishment size distribution from the Census County Business Patterns.")]
+    if cbp and cbp["dist"]:
+        large = sum(d["value"] for d in cbp["dist"] if d["code"] in LARGE_CODES)
+        share = derive.apply("ratio", large, cbp["estabs"]) if cbp["estabs"] else 0
+        biggest = next((d["value"] for d in cbp["dist"] if d["code"] == "260"), 0)
+        struct_parts.append(
+            f'<p class="finding">Of <b>{_int(cbp["estabs"])}</b> establishments in '
+            f'{cbp["year"]}, <b>{share:.0%}</b> employ 250 or more; <b>{_int(biggest)}</b> '
+            f'employ 1,000+. A concentrated core sits above a long tail of small shops.</p>')
+        struct_parts.append(_exhibit(3, f"Establishments by employment size, {cbp['year']}",
+                            _hbars([{"label": d["label"], "value": d["value"]} for d in cbp["dist"]],
+                                   _int, " establishments"),
+                            "Census County Business Patterns. CBP counts differ from QCEW "
+                            "(different methodology and coverage)."))
+    if key_players and key_players.get("players"):
+        players = sorted(key_players["players"], key=lambda p: (p["name"] or ""))[:15]
+        rows = "".join(f'<tr><td class="tk">{p["ticker"] or "—"}</td><td>{p["name"]}</td>'
+                       f'<td class="ck">CIK{p["cik"]}</td></tr>' for p in players)
+        struct_parts.append(_exhibit(4, "Public companies in the industry",
+            '<table class="players"><thead><tr><th>Ticker</th><th>Company</th><th>Filer</th></tr>'
+            f'</thead><tbody>{rows}</tbody></table>',
+            f"SEC EDGAR, SIC {key_players['sic']}. 15 of {key_players['total_named']} public "
+            "filers with tickers; revenue ranking pending."))
+    else:
+        struct_parts.append('<p class="empty">No public companies are classified in this '
+                            "industry under EDGAR — a largely private industry.</p>")
+    section2 = "<section>" + "".join(struct_parts) + "</section>"
+
+    # ---- Section 3: trade exposure --------------------------------------
+    if trade:
+        bal = trade["exports"] - trade["imports"]
+        pen = derive.apply("ratio", trade["imports"], trade["exports"]) if trade["exports"] else 0
+        balword = "surplus" if bal >= 0 else "deficit"
+        section3 = ("<section>" + _section("03", "Trade exposure",
+            "Exposure to global flows — export orientation and import competition, "
+            "from Census monthly trade by HS commodity code.") +
+            f'<p class="finding">In {trade["year"]}, the U.S. ran a trade <b>{balword}</b> of '
+            f'<b>{_usd_b(abs(bal))}</b> in {hs_note.split("—")[0].strip() if hs_note else "this product"}: '
+            f'<b>{_usd_b(trade["exports"])}</b> exports against <b>{_usd_b(trade["imports"])}</b> '
+            f'imports ({pen:.1f}× import cover).</p>' +
+            _exhibit(5, f"Monthly exports vs. imports, HS {hs}", _trade_chart(trade["months"]),
+                     f"Census international trade. {hs_note}") + "</section>")
+    else:
+        section3 = ("<section>" + _section("03", "Trade exposure",
+                    "Export orientation and import competition.") +
+                    '<p class="empty">No trade data loaded for this industry.</p></section>')
+
+    # ---- Section 4: five forces -----------------------------------------
+    rivalry_live = bool(cbp and cbp["dist"])
+    forces = [
+        ("Competitive rivalry",
+         ("Establishment size distribution loaded (Exhibit 3): a concentrated core over a long tail."
+          if rivalry_live else "Awaiting concentration data."),
+         "Backed by CBP" if rivalry_live else "In development"),
+        ("Threat of new entrants", "Capital intensity and establishment birth/death (Census BFS).", "In development"),
+        ("Threat of substitutes", "Adjacent-industry output and pricing (BEA, trade).", "In development"),
+        ("Supplier power", "Upstream input costs and concentration (BEA input-output).", "In development"),
+        ("Buyer power",
+         ("Trade data loaded (Exhibit 5): export dependence and import cover indicate downstream reach."
+          if trade else "Downstream demand concentration and export dependence (trade)."),
+         "Backed by trade" if trade else "In development"),
     ]
+    frows = "".join(
+        f'<div class="frow"><div class="fk">{k}</div><p>{d}</p>'
+        f'<span class="tag{" live" if t.startswith("Backed") else ""}">{t}</span></div>'
+        for k, d, t in forces)
+    section4 = ("<section>" + _section("04", "Competitive forces",
+                "Porter's Five Forces. Each force is written by the model over the loaded "
+                "data, with every figure cited; forces still gathering data are marked.") +
+                f'<div class="forces">{frows}</div></section>')
+
+    # ---- Section 5: provenance ------------------------------------------
+    prov_rows = [("Data as of", " · ".join(vintages)),
+                 ("Sizing", "BLS QCEW (employment, wages, establishments)")]
+    if bea:
+        prov_rows.append(("Market size", "BEA GDP-by-Industry, gross output (TableID 15)"))
+    if cbp:
+        prov_rows.append(("Concentration", "Census County Business Patterns (size distribution)"))
+    if trade:
+        prov_rows.append(("Trade", f"Census international trade, HS {hs} (monthly)"))
+    if key_players:
+        prov_rows.append(("Key players", f"SEC EDGAR, SIC {key_players['sic']}"))
+    prov_rows += [("Licence", prov.get("licence_class", "")),
+                  ("Retrieved", retrieved),
+                  ("Method", "Every figure traces to an observation; computed figures use "
+                             "versioned derivations. No figure hand-entered.")]
     prov_html = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in prov_rows)
+    section5 = ("<section>" + _section("05", "Provenance & data vintages") +
+                f'<div class="prov"><dl>{prov_html}</dl></div></section>')
 
     return f"""<title>{title}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap">
 {STYLE}
-<div class="wrap">
-  <header class="masthead">
-    <p class="eyebrow">Terminal Zero · Industry Analysis</p>
+<article class="paper">
+  <header>
+    <p class="eyebrow">Terminal Zero — Industry Analysis</p>
     <h1>{title}</h1>
-    <p class="dek">A framework-structured brief. The analysis is organised the way
-      an analyst would build it — sizing, players, forces, constraints — and every
-      figure traces to a cited source in the store.</p>
-    <div class="coverage">
+    <p class="standfirst">A provenance-first read on the industry: how big, how fast,
+      how concentrated, how exposed — every figure traceable.</p>
+    <div class="meta">
       <span><b>NAICS</b> {naics}</span>
       <span><b>Period</b> {y0}–{y1}</span>
-      <span><b>Geographies</b> {cov['geos']}</span>
-      <span><b>Observations</b> {cov['observations']}</span>
-      <span><b>Sources</b> {', '.join(cov['sources'])}{', sec-edgar' if players_cite else ''}{', bea' if has_bea else ''}</span>
+      <span class="asof">Data as of {' · '.join(vintages)}</span>
     </div>
   </header>
-
-  <section>
-    {_section_head("I", "Industry sizing")}
-    {_market_size_banner(conn, bea_industry, bea_note)}
-    <p class="label">Key figures · {y1}</p>
-    <div class="tiles">{tiles_html}</div>
-    <p class="label">Indexed growth · {y0} = 100</p>
-    <div class="chartcard">{index_chart}
-      <p class="cap">Each series indexed to its {y0} level. Wages outpacing
-        employment means pay per worker is rising. Source: BLS QCEW; growth via
-        derivation cagr/index_to_base v1.0.0.</p></div>
-    <p class="label">Geographic concentration · employment, {y1}</p>
-    <div class="chartcard">{_bars(top)}
-      <p class="cap">Top {len(top)} states by average annual employment, private
-        ownership. Source: BLS QCEW.</p></div>
-  </section>
-
-  {players_section}
-
-  {_forces_section("III")}
-
-  {_constraints_section("IV")}
-
-  <section>
-    {_section_head("V", "Provenance")}
-    <div class="prov"><h3>How to trace these numbers</h3><dl>{prov_html}</dl></div>
-  </section>
-
-  <div class="foot">
-    <span>Generated from the observation store — no figure hand-entered.</span>
-    <span>Terminal Zero</span>
-  </div>
-</div>
+  {section1}
+  {section2}
+  {section3}
+  {section4}
+  {section5}
+  <div class="foot"><span>Generated from the observation store — no figure hand-entered.</span>
+    <span>Terminal Zero</span></div>
+</article>
 """

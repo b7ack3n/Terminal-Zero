@@ -27,6 +27,8 @@ class IndustryMapping:
     naics: list[str] = field(default_factory=list)   # QCEW/Census axis (sizing)
     bea: list[str] = field(default_factory=list)      # BEA axis (sector market size)
     bea_note: str = ""                                # honest scope of the BEA match
+    hs: list[str] = field(default_factory=list)        # HS codes (trade exposure)
+    hs_note: str = ""                                 # honest scope of the HS match
     note: str = ""
 
 
@@ -39,6 +41,9 @@ INDUSTRY_SIC: dict[str, IndustryMapping] = {
         bea=["334"],
         bea_note="BEA industry 334 'Computer & electronic products' — a superset "
                  "of semiconductor manufacturing (BEA has no finer detail).",
+        hs=["8542"],
+        hs_note="HS 8542 'Electronic integrated circuits' — the industry's primary "
+                "traded product (excludes discrete devices under HS 8541).",
         note="SIC 3674 'Semiconductors & Related Devices'. Deep public coverage.",
     ),
     "airlines": IndustryMapping(
