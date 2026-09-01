@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from terminal_zero import industry, naics
+from terminal_zero import crosswalk, industry, naics
 
 
 class Tier(str, Enum):
@@ -104,9 +104,9 @@ def links_for(code: str) -> list[SourceLink]:
                                 "candidate BLS PPI series — verify it exists at fetch",
                                 primary="BLS PPI"))
 
-    # CURATED / PENDING / GAP — cross-classified sources.
-    links.append(_cross("bea", getattr(curated, "bea", None), "BEA:",
-                        "market size (gross output / value added)", curated, sector))
+    # BEA — curated override wins; else derive via the NAICS->BEA crosswalk.
+    links.append(_bea_link(code, curated))
+    # CURATED / PENDING / GAP — the cross-classified sources with no bulk crosswalk.
     links.append(_cross("sec-edgar", getattr(curated, "sic", None), "SIC:",
                         "public filers (key players)", curated, sector))
     links.append(_cross("census", getattr(curated, "hs", None), "HS:",
@@ -114,6 +114,20 @@ def links_for(code: str) -> list[SourceLink]:
     links.append(_cross("usda-nass", getattr(curated, "nass", None), "NASS:",
                         "agricultural production value", curated, sector))
     return links
+
+
+def _bea_link(code, curated):
+    """BEA market-size link: curated override, else NAICS->BEA crosswalk, else pending."""
+    label = "market size (gross output / value added)"
+    curated_bea = getattr(curated, "bea", None)
+    if curated_bea:
+        return SourceLink("bea", Tier.CURATED, f"BEA:{curated_bea[0]}", "high", label)
+    derived = crosswalk.bea_for(code)
+    if derived:
+        return SourceLink("bea", Tier.DERIVED, f"BEA:{derived}", "medium",
+                        f"{label} — BEA industry {derived} (labelled superset)")
+    return SourceLink("bea", Tier.PENDING, None, "none",
+                    f"{label}: no BEA industry maps to NAICS {code}")
 
 
 def _cross(src, codes, prefix, label, curated, sector):
@@ -134,6 +148,57 @@ def _cross(src, codes, prefix, label, curated, sector):
     # Curated entry with a deliberately empty list -> honest, explained gap.
     reason = curated.note.split(". ")[0] if curated.note else f"no {label} coverage"
     return SourceLink(src, Tier.GAP, None, "none", reason)
+
+
+_BACKBONE = None
+
+
+def _backbone():
+    global _BACKBONE
+    if _BACKBONE is None:
+        _BACKBONE = naics.load()
+    return _BACKBONE
+
+
+def mapping_for(query: str) -> industry.IndustryMapping | None:
+    """Resolve a name or NAICS code to an IndustryMapping — curated or derived.
+
+    This folds resolution onto the registry so `refresh`/`brief` work for ANY
+    industry, not just the hand-authored few. A curated industry keeps its
+    vetted mapping and honesty notes; anything else is derived from the NAICS
+    backbone + crosswalks (BEA market size, BFS sector). SIC/HS/NASS stay empty
+    when uncurated — an honest gap, never a fabricated code.
+    """
+    curated = industry.resolve(query)
+    if curated:
+        return curated
+
+    bb = _backbone()
+    q = query.strip()
+    if q in bb:
+        node = bb.get(q)
+    else:
+        hits = bb.search(query, level=6) or bb.search(query)
+        node = hits[0] if hits else None
+    if node is None:
+        return None
+
+    code = node.code
+    sector = naics.sector_of(code)
+    bea = crosswalk.bea_for(code)
+    bfs = _BFS_SECTOR.get(sector, "")
+    return industry.IndustryMapping(
+        name=node.title,
+        naics=[code],
+        bea=[bea] if bea else [],
+        bea_note=(f"BEA industry {bea} — derived via the NAICS->BEA crosswalk "
+                  f"(labelled superset).") if bea else "",
+        bfs=bfs,
+        bfs_note=f"business formation, sector {sector} (superset)." if bfs else "",
+        note=(f"Derived from NAICS {code} ({node.title}). Market size and business "
+              f"formation are crosswalked; SIC/HS/NASS are not curated for this "
+              f"industry, so those modules are honest gaps."),
+    )
 
 
 def coverage(code: str) -> dict[str, int]:
