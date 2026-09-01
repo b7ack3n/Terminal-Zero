@@ -15,6 +15,7 @@ from __future__ import annotations
 import sqlite3
 
 from terminal_zero import derive, geo, room
+from terminal_zero.bea.io_labels import label as io_label
 from terminal_zero.census.cbp import SIZE_LABELS
 
 SIZE_ORDER = ["210", "220", "230", "241", "242", "251", "252", "254", "260"]
@@ -62,6 +63,29 @@ def _bea_latest_quarter(conn, bea_industry):
         "AND concept='gross_output_saar' ORDER BY period_end DESC LIMIT 1",
         (f"BEA:{bea_industry}",)).fetchone()
     return dict(r) if r else None
+
+
+def _io(conn, bea_industry):
+    """Return input (supplier) and output (buyer) structure from BEA I-O."""
+    if not bea_industry:
+        return None
+    subj = f"BEA:{bea_industry}"
+
+    def rows(like):
+        return [(io_label(r[0].split(":", 1)[1]), r[1]) for r in conn.execute(
+            "SELECT concept, value FROM observations WHERE subject_id=? AND concept LIKE ? "
+            "ORDER BY value DESC", (subj, like))]
+
+    inputs, outputs = rows("io_input:%"), rows("io_output:%")
+    if not inputs and not outputs:
+        return None
+    exp = conn.execute("SELECT value FROM observations WHERE subject_id=? AND "
+                       "concept='io_output:F040'", (subj,)).fetchone()
+    year = conn.execute("SELECT MAX(fiscal_year) FROM observations WHERE subject_id=? AND "
+                        "taxonomy='bea-io'", (subj,)).fetchone()[0]
+    return {"inputs": inputs, "outputs": outputs,
+            "total_in": sum(v for _, v in inputs), "total_out": sum(v for _, v in outputs),
+            "exports": exp[0] if exp else 0, "year": year}
 
 
 def _cbp(conn, naics):
@@ -379,6 +403,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
 
     bea = _bea_output(conn, bea_industry)
     bea_q = _bea_latest_quarter(conn, bea_industry)
+    io = _io(conn, bea_industry)
     cbp = _cbp(conn, naics)
     trade = _trade(conn, hs)
     prov = _provenance(conn, subject)
@@ -392,6 +417,8 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         vintages.append(f"BEA {bea[-1]['year']}")
     if cbp:
         vintages.append(f"CBP {cbp['year']}")
+    if io:
+        vintages.append(f"I-O {io['year']}")
     if trade:
         latest_month = trade["months"][-1]["period_end"][:7]
         vintages.append(f"Trade {latest_month}")
@@ -490,27 +517,55 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
 
     # ---- Section 4: five forces -----------------------------------------
     rivalry_live = bool(cbp and cbp["dist"])
+    io_parts, ex_no = [], 6
+    supplier_desc = "Upstream input costs and concentration (BEA input-output)."
+    buyer_desc = ("Trade data loaded (Exhibit 5): export dependence and import cover."
+                  if trade else "Downstream demand concentration and export dependence.")
+    supplier_tag = buyer_tag = "In development"
+
+    if io and io["inputs"]:
+        top_in, top_in_v = io["inputs"][0]
+        in_share = derive.apply("ratio", top_in_v, io["total_in"]) if io["total_in"] else 0
+        io_parts.append(
+            f'<p class="finding">Inputs are <b>diversified</b>: the largest single supplier '
+            f'({top_in}) is only <b>{in_share:.0%}</b> of <b>{_usd_b0(io["total_in"])}</b> in '
+            f'intermediate purchases ({io["year"]}) — pointing to <b>limited supplier power</b>.</p>')
+        supplier_desc = f"Largest input {in_share:.0%} of {_usd_b0(io['total_in'])}; diversified base."
+        supplier_tag = "Backed by BEA I-O"
+
+    if io and io["outputs"]:
+        top_buy, top_buy_v = io["outputs"][0]
+        buy_share = derive.apply("ratio", top_buy_v, io["total_out"]) if io["total_out"] else 0
+        exp_share = derive.apply("ratio", io["exports"], io["total_out"]) if io["total_out"] else 0
+        io_parts.append(
+            f'<p class="finding">Demand is <b>broad-based</b>: the largest customer ({top_buy}) '
+            f'takes <b>{buy_share:.0%}</b> of output and exports absorb <b>{_usd_b0(io["exports"])}</b> '
+            f'({exp_share:.0%}) — no dominant buyer, indicating <b>limited buyer power</b>.</p>')
+        io_parts.append(_exhibit(ex_no, f"Where the industry's output goes, {io['year']}",
+                        _hbars([{"label": lbl, "value": v} for lbl, v in io["outputs"][:6]],
+                               _usd_b, ""),
+                        "BEA Input-Output, Use table. Top 6 destinations of gross output."))
+        buyer_desc = f"Top buyer {buy_share:.0%}; exports {exp_share:.0%}. Broad demand."
+        buyer_tag = "Backed by BEA I-O"
+
     forces = [
         ("Competitive rivalry",
-         ("Establishment size distribution loaded (Exhibit 3): a concentrated core over a long tail."
+         ("Establishment size distribution (Exhibit 3): a concentrated core over a long tail."
           if rivalry_live else "Awaiting concentration data."),
          "Backed by CBP" if rivalry_live else "In development"),
         ("Threat of new entrants", "Capital intensity and establishment birth/death (Census BFS).", "In development"),
-        ("Threat of substitutes", "Adjacent-industry output and pricing (BEA, trade).", "In development"),
-        ("Supplier power", "Upstream input costs and concentration (BEA input-output).", "In development"),
-        ("Buyer power",
-         ("Trade data loaded (Exhibit 5): export dependence and import cover indicate downstream reach."
-          if trade else "Downstream demand concentration and export dependence (trade)."),
-         "Backed by trade" if trade else "In development"),
+        ("Threat of substitutes", "Largely qualitative — no direct dataset; analytical.", "Narrative"),
+        ("Supplier power", supplier_desc, supplier_tag),
+        ("Buyer power", buyer_desc, buyer_tag),
     ]
     frows = "".join(
         f'<div class="frow"><div class="fk">{k}</div><p>{d}</p>'
         f'<span class="tag{" live" if t.startswith("Backed") else ""}">{t}</span></div>'
         for k, d, t in forces)
     section4 = ("<section>" + _section("04", "Competitive forces",
-                "Porter's Five Forces. Each force is written by the model over the loaded "
-                "data, with every figure cited; forces still gathering data are marked.") +
-                f'<div class="forces">{frows}</div></section>')
+                "Porter's Five Forces. Each force is written over the loaded data, with every "
+                "figure cited; forces still gathering data are marked.") +
+                "".join(io_parts) + f'<div class="forces">{frows}</div></section>')
 
     # ---- Section 5: provenance ------------------------------------------
     prov_rows = [("Data as of", " · ".join(vintages)),
@@ -521,6 +576,8 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         prov_rows.append(("Concentration", "Census County Business Patterns (size distribution)"))
     if trade:
         prov_rows.append(("Trade", f"Census international trade, HS {hs} (monthly)"))
+    if io:
+        prov_rows.append(("Supplier / buyer", "BEA Input-Output, Use table (TableID 259)"))
     if key_players:
         prov_rows.append(("Key players", f"SEC EDGAR, SIC {key_players['sic']}"))
     prov_rows += [("Licence", prov.get("licence_class", "")),

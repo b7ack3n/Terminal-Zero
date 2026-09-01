@@ -15,7 +15,7 @@ import sys
 from datetime import date
 
 from terminal_zero import industry
-from terminal_zero.bea import gdp
+from terminal_zero.bea import gdp, io
 from terminal_zero.bls import qcew
 from terminal_zero.census import cbp, trade
 from terminal_zero.edgar.fetcher import Fetcher
@@ -71,6 +71,18 @@ def main() -> None:
             if obs:
                 insert_observations(conn, obs)
                 report.append(("CBP", y))
+                break
+
+    # BEA Input-Output (Use table) — annual, lags ~2yr. Walk back to latest.
+    if m.bea:
+        for y in range(now, now - 5, -1):
+            try:
+                obs = io.use_observations(fetcher, m.bea[0], y)
+            except RuntimeError:
+                continue
+            if obs:
+                insert_observations(conn, obs)
+                report.append(("BEA I-O", y))
                 break
 
     # Trade — monthly, near-current. Recent years; skips months not yet posted.
