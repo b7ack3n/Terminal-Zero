@@ -20,3 +20,6 @@ venv/
 
 # OS
 .DS_Store
+
+# Generated preview files
+_preview.html
