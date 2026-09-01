@@ -95,6 +95,16 @@ SOURCES: tuple[Source, ...] = (
         auth_param="api_key",
     ),
     Source(
+        # Wikipedia: qualitative CONTEXT only (history, what the industry is),
+        # never a figure of record. CC BY-SA, so it is attributed wherever shown.
+        key="wikipedia",
+        hosts=("en.wikipedia.org",),
+        requests_per_second=1.0,
+        licence_class="cc-by-sa",
+        docs="https://www.mediawiki.org/wiki/API:REST_API",
+        auth="none",
+    ),
+    Source(
         key="usitc-dataweb",
         hosts=("datawebws.usitc.gov",),
         requests_per_second=1.0,

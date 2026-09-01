@@ -25,6 +25,34 @@ PORT = 8777
 _BACKBONE = naics.load()
 
 
+_fetcher = None
+
+
+def _wiki_context(name: str) -> dict | None:
+    """Best-effort Wikipedia context for an industry (qualitative, lower-trust).
+
+    Fetches the REST summary for the industry title; shows the band only if a
+    substantial, non-disambiguation extract comes back. No match -> no band
+    (an honest omission, never a fabricated context).
+    """
+    global _fetcher
+    from terminal_zero.edgar.fetcher import Fetcher
+    if _fetcher is None:
+        _fetcher = Fetcher()
+    title = urllib.parse.quote(name.strip().replace(" ", "_"))
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+    try:
+        payload = _fetcher.get(url).json()
+    except Exception:
+        return None
+    extract = (payload.get("extract") or "").strip()
+    if len(extract) < 120 or payload.get("type") == "disambiguation":
+        return None
+    return {"lead": extract,
+            "note": f'From the Wikipedia article "{payload.get("title", name)}" · '
+                    "CC BY-SA — qualitative context, not a figure of record."}
+
+
 def _has_data(conn, code: str) -> bool:
     return conn.execute(
         "SELECT 1 FROM observations WHERE subject_id=? LIMIT 1",
@@ -200,7 +228,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(brief.render(
                 conn, code, f"U.S. {m.name.title()}",
                 bea_industry=m.bea[0] if m.bea else None, bea_note=m.bea_note,
-                hs=m.hs[0] if m.hs else None, bfs=m.bfs, nass=m.nass or None))
+                hs=m.hs[0] if m.hs else None, bfs=m.bfs, nass=m.nass or None,
+                context=_wiki_context(m.name)))
 
         if parsed.path == "/refresh":
             m = registry.mapping_for(q)

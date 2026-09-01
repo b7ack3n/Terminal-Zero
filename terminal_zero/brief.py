@@ -213,6 +213,11 @@ def _provenance(conn, subject_id):
 
 # ---- formatting ----------------------------------------------------------
 
+def _cite(label, kind="src"):
+    """A citation chip — the provenance made visible. kind: src|der|wiki."""
+    return f'<span class="cite {kind}">{label}</span>'
+
+
 def _int(v): return f"{v:,.0f}"
 def _usd_b(v): return f"${v/1e9:,.1f}B"
 def _usd_b0(v): return f"${v/1e9:,.0f}B"
@@ -442,6 +447,34 @@ section{margin-top:64px}
 .tag{font-size:.66rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
   color:var(--faint);white-space:nowrap}
 .tag.live{color:var(--accent)}
+/* citation chips — the provenance made visible */
+.cite{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.6rem;letter-spacing:.02em;
+  padding:1px 5px;border-radius:4px;margin-left:5px;vertical-align:2px;white-space:nowrap;
+  border:1px solid transparent}
+.cite.src{color:#2C6E68;background:rgba(44,110,104,.12)}
+.cite.der{color:#9C6A1C;background:rgba(156,106,28,.14)}
+.cite.wiki{color:var(--faint);background:var(--accent-soft)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --_srcc:#54B7AC;--_derc:#D6A24A}}
+:root[data-theme="dark"]{--_srcc:#54B7AC;--_derc:#D6A24A}
+.cite.src{color:var(--_srcc,#2C6E68)} .cite.der{color:var(--_derc,#9C6A1C)}
+/* coverage badge */
+.cover-badge{display:inline-flex;align-items:center;gap:6px;font-family:"IBM Plex Mono",monospace;
+  font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;font-weight:600;
+  padding:3px 9px;border-radius:20px;margin-left:auto}
+.cover-badge .bd{width:6px;height:6px;border-radius:50%}
+.cover-badge.full{color:#2C6E68;background:rgba(44,110,104,.12)}
+.cover-badge.full .bd{background:#2C6E68}
+.cover-badge.partial{color:#9C6A1C;background:rgba(156,106,28,.14)}
+.cover-badge.partial .bd{background:#9C6A1C}
+/* Wikipedia context band */
+.context{margin:34px 0 8px;border:1px solid var(--rule);border-left:3px solid var(--faint);
+  border-radius:10px;background:var(--ground);padding:22px 24px}
+.context .ctx-eyebrow{font-family:"IBM Plex Mono",monospace;font-size:.62rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--faint);margin-bottom:12px}
+.context .ctx-lead{font-family:"Newsreader",Georgia,serif;font-style:italic;font-size:1.15rem;
+  line-height:1.55;color:var(--ink);margin:0 0 12px;max-width:66ch}
+.context .ctx-note{font-size:.8rem;color:var(--muted);margin:0;max-width:72ch}
 /* provenance */
 .prov{margin-top:20px}
 .prov dl{display:grid;grid-template-columns:auto 1fr;gap:10px 22px;margin:0;font-size:.82rem}
@@ -454,7 +487,7 @@ section{margin-top:64px}
 
 
 def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
-           hs=None, hs_note="", bfs=None, bfs_note="", nass=None) -> str:
+           hs=None, hs_note="", bfs=None, bfs_note="", nass=None, context=None) -> str:
     subject = f"NAICS:{naics}"
     series = _us_series(conn, subject)
     if not series:
@@ -518,7 +551,8 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
                    "agriculture and is far broader.") if bea else ""
         headline = (
             '<div class="headline"><div class="k">Value of production · '
-            f'{nass_data["year"]}</div><div class="big serif">{_usd_b(nass_data["total"])}</div>'
+            f'{nass_data["year"]}</div><div class="big serif">{_usd_b(nass_data["total"])}'
+            f'{_cite("NASS")}</div>'
             f'<p class="note">USDA value of production across {len(nass_data["items"])} tree-nut '
             f'commodities ({top}).{bea_ref} Source: USDA NASS.</p></div>')
     elif bea:
@@ -530,7 +564,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
                       f'{_usd_b0(bea_q["value"])} (annualised rate).')
         headline = (
             '<div class="headline"><div class="k">Market size · sector gross output · '
-            f'{bl["year"]}</div><div class="big serif">{_usd_b0(bl["value"])}'
+            f'{bl["year"]}</div><div class="big serif">{_usd_b0(bl["value"])}{_cite("BEA")}'
             f'<span class="chg">{bcagr:+.1%}/yr since {bf["year"]}</span></div>'
             f'<p class="note">{bea_note} Source: BEA GDP-by-Industry.{q_note}</p></div>')
     else:
@@ -538,15 +572,15 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
                     '<div class="big serif">—</div><p class="note">BEA source not loaded.</p></div>')
 
     figs = [
-        ("Establishments", _int(estabs[-1]), cagr(estabs), _sparkline(estabs)),
-        ("Employment", _int(emp[-1]), cagr(emp), _sparkline(emp)),
-        ("Total wages", _usd_b(wages[-1]), cagr(wages), _sparkline(wages)),
-        ("Avg pay / worker", f"${_int(pay[-1])}", cagr(pay), _sparkline(pay)),
-        ("Workers / estab.", f"{size[-1]:.0f}", cagr(size), _sparkline(size)),
+        ("Establishments", _int(estabs[-1]), cagr(estabs), _sparkline(estabs), _cite("QCEW")),
+        ("Employment", _int(emp[-1]), cagr(emp), _sparkline(emp), _cite("QCEW")),
+        ("Total wages", _usd_b(wages[-1]), cagr(wages), _sparkline(wages), _cite("QCEW")),
+        ("Avg pay / worker", f"${_int(pay[-1])}", cagr(pay), _sparkline(pay), _cite("derived", "der")),
+        ("Workers / estab.", f"{size[-1]:.0f}", cagr(size), _sparkline(size), _cite("derived", "der")),
     ]
     figband = '<div class="figband">' + "".join(
-        f'<div class="fig"><div class="k">{k}</div><div class="v">{v}</div>'
-        f'<div class="c">{c} since {y0}</div>{sp}</div>' for k, v, c, sp in figs) + "</div>"
+        f'<div class="fig"><div class="k">{k}</div><div class="v">{v}{ct}</div>'
+        f'<div class="c">{c} since {y0}</div>{sp}</div>' for k, v, c, sp, ct in figs) + "</div>"
 
     nass_ex = ""
     if nass_data:
@@ -728,10 +762,26 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     section5 = ("<section>" + _section("05", "Provenance & data vintages") +
                 f'<div class="prov"><dl>{prov_html}</dl></div></section>')
 
+    # Coverage badge: Full only when the industry has size + concentration +
+    # trade + (players or supplier/buyer structure); otherwise an honest Partial.
+    _tier = "full" if (bool(bea or nass_data) and bool(cbp and cbp["dist"])
+                       and trade and (key_players or io)) else "partial"
+    cover_badge = (f'<span class="cover-badge {_tier}"><span class="bd"></span>'
+                   f'{"Full brief" if _tier == "full" else "Partial"}</span>')
+
+    # Optional Wikipedia context band (qualitative, clearly lower-trust).
+    context_band = ""
+    if context and context.get("lead"):
+        note = context.get("note",
+                           "Context from Wikipedia · CC BY-SA — qualitative, not a figure of record.")
+        context_band = (f'<div class="context"><div class="ctx-eyebrow">Industry context</div>'
+                        f'<p class="ctx-lead">{context["lead"]}</p>'
+                        f'<p class="ctx-note">{note}</p></div>')
+
     return f"""<title>{title}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Libre+Franklin:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap">
 {STYLE}
 <article class="paper">
   <header>
@@ -743,8 +793,10 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
       <span><b>NAICS</b> {naics}</span>
       <span><b>Period</b> {y0}–{y1}</span>
       <span class="asof">Data as of {' · '.join(vintages)}</span>
+      {cover_badge}
     </div>
   </header>
+  {context_band}
   {section1}
   {section2}
   {section3}
