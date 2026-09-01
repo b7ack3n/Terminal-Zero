@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from terminal_zero import geo, room
+from terminal_zero import derive, geo, room
 
 # ---- data assembly (all numbers come from the store) ---------------------
 
@@ -89,6 +89,46 @@ def _sparkline(values):
         f'role="img" aria-hidden="true"><polygon class="spark-area" points="{area}"/>'
         f'<polyline class="spark-line" points="{line}"/></svg>'
     )
+
+
+def _index_chart(years, series_map):
+    """Multi-series line chart, each series indexed to its first year = 100.
+
+    One shared scale (indexing solves the different-magnitude problem without a
+    forbidden dual axis). Series are distinguished by ink value + dash + a direct
+    end-label, so identity never rests on colour alone. Emphasis order matters:
+    the first series gets the accent.
+    """
+    w, h = 660, 300
+    ml, mr, mt, mb = 40, 104, 18, 32
+    pw, ph = w - ml - mr, h - mt - mb
+    indexed = {k: derive.apply("index_to_base", v, v[0]) for k, v in series_map.items()}
+    allv = [x for vs in indexed.values() for x in vs]
+    lo, hi = min(allv + [100]), max(allv)
+    pad = (hi - lo) * 0.12 or 8
+    ymin, ymax = lo - pad, hi + pad
+    n = len(years)
+
+    def X(i): return ml + pw * i / (n - 1)
+    def Y(v): return mt + ph * (1 - (v - ymin) / (ymax - ymin))
+
+    parts = [f'<svg class="idx" viewBox="0 0 {w} {h}" role="img">']
+    # baseline at index 100
+    y100 = Y(100)
+    parts.append(f'<line class="idx-base" x1="{ml}" y1="{y100:.1f}" x2="{ml + pw}" y2="{y100:.1f}"/>')
+    parts.append(f'<text class="idx-axis" x="{ml - 8}" y="{y100:.1f}" text-anchor="end" dominant-baseline="central">100</text>')
+    # x-axis year labels
+    for i, yr in enumerate(years):
+        parts.append(f'<text class="idx-axis" x="{X(i):.1f}" y="{h - 8}" text-anchor="middle">{yr}</text>')
+    # one line + end label per series
+    for cls, (name, vals) in enumerate(indexed.items()):
+        pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(vals))
+        parts.append(f'<polyline class="idx-line idx-{cls}" points="{pts}"/>')
+        ex, ey = X(n - 1), Y(vals[-1])
+        parts.append(f'<circle class="idx-dot idx-{cls}" cx="{ex:.1f}" cy="{ey:.1f}" r="3"/>')
+        parts.append(f'<text class="idx-end idx-{cls}t" x="{ex + 8:.1f}" y="{ey:.1f}" dominant-baseline="central">{name} {vals[-1]:.0f}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
 
 
 def _bars(rows):
@@ -240,8 +280,24 @@ section{margin-top:52px}
 .sect-lede{color:var(--muted);max-width:64ch;margin:16px 0 22px}
 .label{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.14em;
   text-transform:uppercase;color:var(--faint);margin:22px 0 16px}
-.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-@media(max-width:680px){.tiles{grid-template-columns:1fr}}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(172px,1fr));gap:16px}
+@media(max-width:680px){.tiles{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}}
+.marketsize{display:flex;align-items:baseline;gap:14px 20px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:10px;padding:18px 22px;margin-bottom:20px}
+.marketsize .ms-k{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted)}
+.marketsize .ms-v{font-family:"IBM Plex Serif",Georgia,serif;font-size:1.3rem;font-weight:600;
+  color:var(--faint)}
+.idx{display:block;width:100%;height:auto;margin-top:4px}
+.idx-base{stroke:var(--line);stroke-width:1;stroke-dasharray:2 3}
+.idx-axis{font-family:"IBM Plex Mono",monospace;font-size:11px;fill:var(--faint)}
+.idx-line{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.idx-0{stroke:var(--accent)} .idx-1{stroke:var(--muted)}
+.idx-2{stroke:var(--faint);stroke-dasharray:5 3}
+.idx-dot.idx-0{fill:var(--accent)} .idx-dot.idx-1{fill:var(--muted)} .idx-dot.idx-2{fill:var(--faint)}
+.idx-end{font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-variant-numeric:tabular-nums}
+.idx-0t{fill:var(--accent-ink)} .idx-1t{fill:var(--muted)} .idx-2t{fill:var(--faint)}
 .tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;
   padding:20px 20px 14px;display:flex;flex-direction:column;gap:2px}
 .tile .k{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.12em;
@@ -307,15 +363,32 @@ def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None) -
     prov = _provenance(conn, subject)
     cov = room.summary(conn, room.RoomDefinition(name="_", subject_ids=[subject]))
 
+    # Series for each measure, plus two derived series (all via the registry).
+    estabs = [s["estabs"] for s in series]
+    emp = [s["emp"] for s in series]
+    wages = [s["wages"] for s in series]
+    pay = [derive.apply("avg_annual_pay", s["wages"], s["emp"]) for s in series]
+    size = [derive.apply("avg_establishment_size", s["emp"], s["estabs"]) for s in series]
+    n_years = max(y1 - y0, 1)
+
+    def cagr_label(vals):
+        return f"{derive.apply('cagr', vals[0], vals[-1], n_years):+.1%}/yr"
+
     tiles = [
-        ("Establishments", _int(last["estabs"]), _pct(first["estabs"], last["estabs"]), _sparkline([s["estabs"] for s in series])),
-        ("Employment", _int(last["emp"]), _pct(first["emp"], last["emp"]), _sparkline([s["emp"] for s in series])),
-        ("Total annual wages", _usd_b(last["wages"]), _pct(first["wages"], last["wages"]), _sparkline([s["wages"] for s in series])),
+        ("Establishments", _int(estabs[-1]), cagr_label(estabs), _sparkline(estabs)),
+        ("Employment", _int(emp[-1]), cagr_label(emp), _sparkline(emp)),
+        ("Total annual wages", _usd_b(wages[-1]), cagr_label(wages), _sparkline(wages)),
+        ("Avg pay / worker", f"${_int(pay[-1])}", cagr_label(pay), _sparkline(pay)),
+        ("Workers / establishment", f"{size[-1]:.0f}", cagr_label(size), _sparkline(size)),
     ]
     tiles_html = "".join(
         f'<div class="tile"><span class="k">{k}</span><span class="v">{v}</span>'
-        f'<span class="chg">{chg} since {y0}</span>{spark}</div>'
+        f'<span class="chg">{chg} · since {y0}</span>{spark}</div>'
         for k, v, chg, spark in tiles
+    )
+    index_chart = _index_chart(
+        [s["year"] for s in series],
+        {"Wages": wages, "Establishments": estabs, "Employment": emp},
     )
 
     players_section, players_cite = _key_players_section("II", key_players)
@@ -359,8 +432,18 @@ def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None) -
 
   <section>
     {_section_head("I", "Industry sizing")}
+    <div class="marketsize">
+      <span class="ms-k">Market size · gross output</span>
+      <span class="ms-v">Pending</span>
+      <span class="pending">Add a BEA key to source this (BEA gross output by industry)</span>
+    </div>
     <p class="label">Key figures · {y1}</p>
     <div class="tiles">{tiles_html}</div>
+    <p class="label">Indexed growth · {y0} = 100</p>
+    <div class="chartcard">{index_chart}
+      <p class="cap">Each series indexed to its {y0} level. Wages outpacing
+        employment means pay per worker is rising. Source: BLS QCEW; growth via
+        derivation cagr/index_to_base v1.0.0.</p></div>
     <p class="label">Geographic concentration · employment, {y1}</p>
     <div class="chartcard">{_bars(top)}
       <p class="cap">Top {len(top)} states by average annual employment, private
