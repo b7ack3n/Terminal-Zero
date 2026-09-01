@@ -23,3 +23,6 @@ venv/
 
 # Generated preview files
 _preview.html
+
+# Local project context for Claude Code — keep on disk, not on GitHub
+CLAUDE.md
