@@ -65,6 +65,21 @@ def _bea_latest_quarter(conn, bea_industry):
     return dict(r) if r else None
 
 
+def _bfs(conn, category):
+    """New-business applications by full year (sector-level), latest first."""
+    if not category:
+        return None
+    subj = f"BFS:{category}"
+    counts = dict(conn.execute(
+        "SELECT fiscal_year, count(*) FROM observations WHERE subject_id=? AND "
+        "concept='bfs_applications' GROUP BY fiscal_year", (subj,)).fetchall())
+    rows = conn.execute(
+        "SELECT fiscal_year, SUM(value) FROM observations WHERE subject_id=? AND "
+        "concept='bfs_applications' GROUP BY fiscal_year ORDER BY fiscal_year", (subj,)).fetchall()
+    apps = [(y, v) for y, v in rows if counts.get(y, 0) >= 12]   # full years only
+    return {"apps": apps} if apps else None
+
+
 def _io(conn, bea_industry):
     """Return input (supplier) and output (buyer) structure from BEA I-O."""
     if not bea_industry:
@@ -386,7 +401,7 @@ section{margin-top:64px}
 
 
 def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
-           hs=None, hs_note="") -> str:
+           hs=None, hs_note="", bfs=None, bfs_note="") -> str:
     subject = f"NAICS:{naics}"
     series = _us_series(conn, subject)
     if not series:
@@ -404,6 +419,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     bea = _bea_output(conn, bea_industry)
     bea_q = _bea_latest_quarter(conn, bea_industry)
     io = _io(conn, bea_industry)
+    bfs_data = _bfs(conn, bfs)
     cbp = _cbp(conn, naics)
     trade = _trade(conn, hs)
     prov = _provenance(conn, subject)
@@ -419,6 +435,11 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         vintages.append(f"CBP {cbp['year']}")
     if io:
         vintages.append(f"I-O {io['year']}")
+    if bfs_data:
+        bm = conn.execute("SELECT MAX(period_end) FROM observations WHERE subject_id=?",
+                          (f"BFS:{bfs}",)).fetchone()[0]
+        if bm:
+            vintages.append(f"BFS {bm[:7]}")
     if trade:
         latest_month = trade["months"][-1]["period_end"][:7]
         vintages.append(f"Trade {latest_month}")
@@ -548,12 +569,26 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         buyer_desc = f"Top buyer {buy_share:.0%}; exports {exp_share:.0%}. Broad demand."
         buyer_tag = "Backed by BEA I-O"
 
+    # Threat of new entrants: QCEW net establishment growth + BFS applications trend.
+    estab_cagr = derive.apply("cagr", estabs[0], estabs[-1], n_years)
+    entrants_desc, entrants_tag = "Capital intensity and establishment birth/death.", "In development"
+    if bfs_data and len(bfs_data["apps"]) >= 2:
+        (py, pv), (ly, lv) = bfs_data["apps"][-2], bfs_data["apps"][-1]
+        apps_yoy = derive.apply("yoy", pv, lv)
+        io_parts.append(
+            f'<p class="finding">Establishments grew <b>{estab_cagr:+.1%}/yr</b> (net entry, QCEW), '
+            f'while manufacturing-wide new-business applications moved <b>{apps_yoy:+.0%}</b> in {ly} '
+            f'(BFS, sector-level). Yet fab-scale <b>capital intensity</b> keeps real entry barriers '
+            f'high — a qualitative brake the counts understate.</p>')
+        entrants_desc = f"Estabs {estab_cagr:+.1%}/yr; sector applications {apps_yoy:+.0%} {ly}."
+        entrants_tag = "Backed by QCEW + BFS"
+
     forces = [
         ("Competitive rivalry",
          ("Establishment size distribution (Exhibit 3): a concentrated core over a long tail."
           if rivalry_live else "Awaiting concentration data."),
          "Backed by CBP" if rivalry_live else "In development"),
-        ("Threat of new entrants", "Capital intensity and establishment birth/death (Census BFS).", "In development"),
+        ("Threat of new entrants", entrants_desc, entrants_tag),
         ("Threat of substitutes", "Largely qualitative — no direct dataset; analytical.", "Narrative"),
         ("Supplier power", supplier_desc, supplier_tag),
         ("Buyer power", buyer_desc, buyer_tag),
@@ -578,6 +613,8 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         prov_rows.append(("Trade", f"Census international trade, HS {hs} (monthly)"))
     if io:
         prov_rows.append(("Supplier / buyer", "BEA Input-Output, Use table (TableID 259)"))
+    if bfs_data:
+        prov_rows.append(("New entrants", "Census Business Formation Statistics (sector level)"))
     if key_players:
         prov_rows.append(("Key players", f"SEC EDGAR, SIC {key_players['sic']}"))
     prov_rows += [("Licence", prov.get("licence_class", "")),
