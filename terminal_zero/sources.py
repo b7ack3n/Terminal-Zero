@@ -79,6 +79,32 @@ SOURCES: tuple[Source, ...] = (
         auth_param="UserID",                           # BEA names its key param UserID
     ),
     Source(
+        # FRED aggregates 800k+ series from 100+ publishers behind one API. We
+        # ingest ONLY series whose underlying publisher is US-gov public domain
+        # (BLS, BEA, Census, Fed, EIA, Treasury) — never FRED's copyrighted
+        # third-party series (OECD, World Bank, private) — and we always carry
+        # the primary publisher as the citation. FRED is a convenience layer for
+        # breadth, not a replacement for primary sources where granularity matters.
+        key="fred",
+        hosts=("api.stlouisfed.org",),
+        requests_per_second=2.0,                       # FRED allows 120/min
+        licence_class="us-gov-public-domain",          # enforced: gov-source series only
+        docs="https://fred.stlouisfed.org/docs/api/fred/",
+        auth="query_param",
+        auth_env="FRED_API_KEY",
+        auth_param="api_key",
+    ),
+    Source(
+        # Wikipedia: qualitative CONTEXT only (history, what the industry is),
+        # never a figure of record. CC BY-SA, so it is attributed wherever shown.
+        key="wikipedia",
+        hosts=("en.wikipedia.org",),
+        requests_per_second=1.0,
+        licence_class="cc-by-sa",
+        docs="https://www.mediawiki.org/wiki/API:REST_API",
+        auth="none",
+    ),
+    Source(
         key="usitc-dataweb",
         hosts=("datawebws.usitc.gov",),
         requests_per_second=1.0,
