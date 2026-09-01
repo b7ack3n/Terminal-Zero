@@ -5,6 +5,11 @@
 # Raw fetched responses — provenance cache, not source. Regenerable, can get large.
 data/cache/
 
+# The SQLite store — derived from cache + parsers, regenerable.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
 # Python
 __pycache__/
 *.py[cod]
