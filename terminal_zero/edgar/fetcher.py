@@ -168,6 +168,11 @@ class Fetcher:
                 f"{source.key} returned HTTP {exc.code} for {url}\n{detail}"
             ) from exc
 
+        # Some APIs (e.g. BEA) echo the request — including the key — back in the
+        # response body. Redact the credential before it ever touches disk or a
+        # parser. The parser never needs the key, so this is lossless.
+        body = _redact_secret(body, source)
+
         self._write_cache(url, body, retrieved_at, status)
         return FetchResult(
             url=url,
@@ -193,6 +198,20 @@ def _default_user_agent() -> str:
     otherwise a generic string. Never raises — only the SEC path is mandatory.
     """
     return os.environ.get(config.SEC_CONTACT_ENV, "").strip() or "Terminal Zero research bot"
+
+
+def _redact_secret(body: bytes, source: sources.Source) -> bytes:
+    """Replace a source's API key with a placeholder if it appears in the body.
+
+    APIs that echo request parameters can leak the key into the response. We
+    never want a credential written to the cache, so scrub it here.
+    """
+    if not source.auth_env:
+        return body
+    secret = os.environ.get(source.auth_env, "").strip()
+    if secret:
+        body = body.replace(secret.encode("utf-8"), b"<REDACTED>")
+    return body
 
 
 def _read_maybe_gzip(response) -> bytes:

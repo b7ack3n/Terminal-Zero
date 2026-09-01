@@ -25,6 +25,8 @@ class IndustryMapping:
     name: str
     sic: list[str] = field(default_factory=list)     # EDGAR axis (key players)
     naics: list[str] = field(default_factory=list)   # QCEW/Census axis (sizing)
+    bea: list[str] = field(default_factory=list)      # BEA axis (sector market size)
+    bea_note: str = ""                                # honest scope of the BEA match
     note: str = ""
 
 
@@ -34,6 +36,9 @@ INDUSTRY_SIC: dict[str, IndustryMapping] = {
         name="semiconductors",
         sic=["3674"],
         naics=["334413"],
+        bea=["334"],
+        bea_note="BEA industry 334 'Computer & electronic products' — a superset "
+                 "of semiconductor manufacturing (BEA has no finer detail).",
         note="SIC 3674 'Semiconductors & Related Devices'. Deep public coverage.",
     ),
     "airlines": IndustryMapping(

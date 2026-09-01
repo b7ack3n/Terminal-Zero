@@ -157,6 +157,38 @@ def _section_head(num, title):
     return f'<div class="sect-head"><span class="sect-num">{num}</span><h2>{title}</h2></div>'
 
 
+def _market_size_banner(conn, bea_industry, bea_note):
+    """Market-size banner from BEA gross output, or an honest pending state."""
+    rows = []
+    if bea_industry:
+        rows = conn.execute(
+            "SELECT fiscal_year, value FROM observations WHERE subject_id=? "
+            "AND concept='gross_output' AND geo='US' ORDER BY fiscal_year",
+            (f"BEA:{bea_industry}",),
+        ).fetchall()
+    if not rows:
+        return (
+            '<div class="marketsize">'
+            '<span class="ms-k">Market size · gross output</span>'
+            '<span class="ms-v">Pending</span>'
+            '<span class="pending">Add a BEA key to source this (BEA gross output by industry)</span>'
+            "</div>"
+        )
+    first, last = rows[0], rows[-1]
+    y0, y1 = first["fiscal_year"], last["fiscal_year"]
+    cagr = derive.apply("cagr", first["value"], last["value"], max(y1 - y0, 1))
+    return (
+        '<div class="marketsize done">'
+        '<div class="ms-main">'
+        f'<span class="ms-k">Market size · gross output · {y1}</span>'
+        f'<span class="ms-big">${last["value"] / 1e9:,.0f}B</span>'
+        f'<span class="ms-chg">{cagr:+.1%}/yr since {y0}</span>'
+        "</div>"
+        f'<p class="ms-note">{bea_note} Source: BEA GDP-by-Industry (gross output).</p>'
+        "</div>"
+    )
+
+
 def _key_players_section(num, key_players):
     body = ""
     if not key_players or not key_players.get("players"):
@@ -289,6 +321,13 @@ section{margin-top:52px}
   text-transform:uppercase;color:var(--muted)}
 .marketsize .ms-v{font-family:"IBM Plex Serif",Georgia,serif;font-size:1.3rem;font-weight:600;
   color:var(--faint)}
+.marketsize.done{flex-direction:column;align-items:flex-start;gap:8px}
+.ms-main{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.ms-big{font-family:"IBM Plex Serif",Georgia,serif;font-size:2rem;font-weight:600;
+  color:var(--ink);letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.ms-chg{font-family:"IBM Plex Mono",monospace;font-size:.85rem;color:var(--accent-ink);
+  font-variant-numeric:tabular-nums}
+.ms-note{margin:0;color:var(--muted);font-size:.82rem;max-width:72ch}
 .idx{display:block;width:100%;height:auto;margin-top:4px}
 .idx-base{stroke:var(--line);stroke-width:1;stroke-dasharray:2 3}
 .idx-axis{font-family:"IBM Plex Mono",monospace;font-size:11px;fill:var(--faint)}
@@ -352,7 +391,8 @@ section{margin-top:52px}
 """
 
 
-def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None) -> str:
+def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None,
+           bea_industry=None, bea_note="") -> str:
     subject = f"NAICS:{naics}"
     series = _us_series(conn, subject)
     if not series:
@@ -392,6 +432,9 @@ def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None) -
     )
 
     players_section, players_cite = _key_players_section("II", key_players)
+    has_bea = bool(bea_industry and conn.execute(
+        "SELECT 1 FROM observations WHERE subject_id=? AND concept='gross_output' LIMIT 1",
+        (f"BEA:{bea_industry}",)).fetchone())
     retrieved = (prov.get("last") or "")[:10]
 
     # Provenance rows — list every source the brief actually drew on.
@@ -402,6 +445,9 @@ def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None) -
     if players_cite:
         prov_rows.append(("Key players source", "sec-edgar · company classification by SIC"))
         prov_rows.append(("Key players endpoint", f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&SIC={players_cite['sic']}"))
+    if has_bea:
+        prov_rows.append(("Market size source", "bea · GDP-by-Industry, gross output (TableID 15)"))
+        prov_rows.append(("Market size endpoint", "https://apps.bea.gov/api/data/?method=GetData&datasetname=GDPbyIndustry&TableID=15"))
     prov_rows += [
         ("Licence", prov.get("licence_class", "")),
         ("Retrieved", retrieved),
@@ -426,17 +472,13 @@ def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None) -
       <span><b>Period</b> {y0}–{y1}</span>
       <span><b>Geographies</b> {cov['geos']}</span>
       <span><b>Observations</b> {cov['observations']}</span>
-      <span><b>Sources</b> {', '.join(cov['sources'])}{', sec-edgar' if players_cite else ''}</span>
+      <span><b>Sources</b> {', '.join(cov['sources'])}{', sec-edgar' if players_cite else ''}{', bea' if has_bea else ''}</span>
     </div>
   </header>
 
   <section>
     {_section_head("I", "Industry sizing")}
-    <div class="marketsize">
-      <span class="ms-k">Market size · gross output</span>
-      <span class="ms-v">Pending</span>
-      <span class="pending">Add a BEA key to source this (BEA gross output by industry)</span>
-    </div>
+    {_market_size_banner(conn, bea_industry, bea_note)}
     <p class="label">Key figures · {y1}</p>
     <div class="tiles">{tiles_html}</div>
     <p class="label">Indexed growth · {y0} = 100</p>

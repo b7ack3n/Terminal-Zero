@@ -45,11 +45,15 @@ def main() -> None:
     fetcher = Fetcher()
     conn = connect()
     key_players = resolve_key_players(fetcher, naics)
-    html = brief.render(conn, naics, title, key_players=key_players)
+    mapping = industry.resolve_naics(naics)
+    bea_industry = mapping.bea[0] if mapping and mapping.bea else None
+    bea_note = mapping.bea_note if mapping else ""
+    html = brief.render(conn, naics, title, key_players=key_players,
+                        bea_industry=bea_industry, bea_note=bea_note)
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
     n = key_players["total_named"] if key_players else 0
-    print(f"wrote {len(html):,} bytes -> {out} ({n} key players)")
+    print(f"wrote {len(html):,} bytes -> {out} ({n} key players, bea={bea_industry})")
 
 
 if __name__ == "__main__":
