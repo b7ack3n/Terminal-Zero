@@ -78,10 +78,12 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 
 -- Idempotent ingest that does NOT collapse restatements: the identity of a
--- source assertion includes its accession. coalesce() makes NULL start /
--- accession compare equal across re-runs (SQLite treats raw NULLs as distinct).
+-- source assertion includes its accession. geo is part of identity too — an
+-- industry figure for CA and for TX are different rows. coalesce() makes NULL
+-- geo / start / accession compare equal across re-runs (SQLite treats raw
+-- NULLs as distinct in a unique index).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_observation_identity ON observations(
-    source, subject_id, taxonomy, concept, unit,
+    source, subject_id, coalesce(geo, ''), taxonomy, concept, unit,
     coalesce(period_start, ''), period_end, coalesce(accession, '')
 );
 

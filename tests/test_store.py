@@ -71,6 +71,19 @@ class InsertAndIdempotency(unittest.TestCase):
         n = insert_observations(conn, [flow, stock])
         self.assertEqual(n, 2)
 
+    def test_same_measure_different_geo_are_distinct_rows(self):
+        # Regression: geo is part of identity — an industry figure for two
+        # places must not collapse into one row.
+        conn = mem_store()
+        us = obs(subject_type="industry", subject_id="NAICS:334413", accession=None,
+                 concept="annual_avg_emplvl", measure_type="stock", period_start=None,
+                 geo="US", value=203618)
+        ca = obs(subject_type="industry", subject_id="NAICS:334413", accession=None,
+                 concept="annual_avg_emplvl", measure_type="stock", period_start=None,
+                 geo="STATE:06", value=60000)
+        n = insert_observations(conn, [us, ca])
+        self.assertEqual(n, 2)
+
 
 class KeepEveryVintage(unittest.TestCase):
     def test_restatement_new_accession_is_kept(self):
