@@ -32,10 +32,6 @@ BROWSE_EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar"
 # The ticker -> CIK -> name index, used to attach human-readable names.
 ENTITY_INDEX_URL = "https://www.sec.gov/files/company_tickers.json"
 
-# Provenance stamps. SEC EDGAR data is US-government work — public domain.
-SOURCE = "sec-edgar"
-LICENCE_CLASS = "us-gov-public-domain"
-
 
 @dataclass(frozen=True)
 class EntityRef:
@@ -125,10 +121,10 @@ def filers_for_sic(
                     ticker=ticker,
                     sic=(sic_el.text.strip() if sic_el is not None and sic_el.text else str(sic)),
                     state=(state_el.text.strip() if state_el is not None and state_el.text else None),
-                    source=SOURCE,
+                    source=result.source,
                     source_url=url,
                     retrieved_at=result.retrieved_at,
-                    licence_class=LICENCE_CLASS,
+                    licence_class=result.licence_class,
                 )
             )
 
