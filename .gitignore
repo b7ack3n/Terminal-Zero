@@ -1,0 +1,13 @@
+# Raw fetched responses — provenance cache, not source. Regenerable, can get large.
+data/cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# OS
+.DS_Store
