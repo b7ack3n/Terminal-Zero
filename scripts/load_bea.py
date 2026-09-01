@@ -14,11 +14,13 @@ from terminal_zero.store import connect, count, insert_observations
 def main() -> None:
     industry = sys.argv[1] if len(sys.argv) > 1 else "334"
     y0 = int(sys.argv[2]) if len(sys.argv) > 2 else 2019
-    y1 = int(sys.argv[3]) if len(sys.argv) > 3 else 2024
+    y1 = int(sys.argv[3]) if len(sys.argv) > 3 else 2025
 
     fetcher = Fetcher()
     conn = connect()
-    obs = gdp.industry_observations(fetcher, industry, range(y0, y1 + 1))
+    # annual series + the two most recent years of quarters (for currency)
+    obs = gdp.industry_observations(fetcher, industry, range(y0, y1 + 1),
+                                    quarters=[y1, y1 + 1])
     inserted = insert_observations(conn, obs)
     print(f"BEA industry {industry}: parsed {len(obs)}, inserted {inserted} new "
           f"(store now {count(conn):,})")

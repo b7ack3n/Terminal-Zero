@@ -54,6 +54,16 @@ def _bea_output(conn, bea_industry):
            ORDER BY fiscal_year""", (f"BEA:{bea_industry}",)).fetchall()]
 
 
+def _bea_latest_quarter(conn, bea_industry):
+    if not bea_industry:
+        return None
+    r = conn.execute(
+        "SELECT fiscal_year, fiscal_period, value FROM observations WHERE subject_id=? "
+        "AND concept='gross_output_saar' ORDER BY period_end DESC LIMIT 1",
+        (f"BEA:{bea_industry}",)).fetchone()
+    return dict(r) if r else None
+
+
 def _cbp(conn, naics):
     """Return CBP totals + establishment size distribution (latest year)."""
     subj = f"NAICS:{naics}"
@@ -368,6 +378,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     cagr = lambda v: f"{derive.apply('cagr', v[0], v[-1], n_years):+.1%}/yr"
 
     bea = _bea_output(conn, bea_industry)
+    bea_q = _bea_latest_quarter(conn, bea_industry)
     cbp = _cbp(conn, naics)
     trade = _trade(conn, hs)
     prov = _provenance(conn, subject)
@@ -375,7 +386,9 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
 
     # ---- cover meta / freshness -----------------------------------------
     vintages = [f"QCEW {y1}"]
-    if bea:
+    if bea_q:
+        vintages.append(f"BEA {bea_q['fiscal_year']} {bea_q['fiscal_period']}")
+    elif bea:
         vintages.append(f"BEA {bea[-1]['year']}")
     if cbp:
         vintages.append(f"CBP {cbp['year']}")
@@ -387,11 +400,15 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     if bea:
         bf, bl = bea[0], bea[-1]
         bcagr = derive.apply("cagr", bf["value"], bl["value"], max(bl["year"]-bf["year"], 1))
+        q_note = ""
+        if bea_q:
+            q_note = (f' Most recent quarter: {bea_q["fiscal_period"]} {bea_q["fiscal_year"]} '
+                      f'{_usd_b0(bea_q["value"])} (annualised rate).')
         headline = (
             '<div class="headline"><div class="k">Market size · sector gross output · '
             f'{bl["year"]}</div><div class="big serif">{_usd_b0(bl["value"])}'
             f'<span class="chg">{bcagr:+.1%}/yr since {bf["year"]}</span></div>'
-            f'<p class="note">{bea_note} Source: BEA GDP-by-Industry.</p></div>')
+            f'<p class="note">{bea_note} Source: BEA GDP-by-Industry.{q_note}</p></div>')
     else:
         headline = ('<div class="headline"><div class="k">Market size</div>'
                     '<div class="big serif">—</div><p class="note">BEA source not loaded.</p></div>')
