@@ -149,33 +149,50 @@ class Naics:
             p = parent(p)
         return list(reversed(chain))
 
-    def search(self, text: str, level: int | None = None) -> list[NaicsNode]:
-        """Substring/code search, ranked exact-code, then prefix, then contains.
+    # Common colloquial terms whose NAICS wording differs, so a plain-language
+    # search still lands. Kept tiny and obvious — the AI/NL resolver generalises
+    # this later; this just stops the everyday words from missing.
+    _ALIASES = {
+        "airline": "air transportation", "airlines": "air transportation",
+        "chips": "semiconductor", "cars": "motor vehicle", "movies": "motion picture",
+        "drugs": "pharmaceutical", "banks": "credit intermediation", "oil": "petroleum",
+    }
 
-        A deliberately simple first hop — the AI/NL resolver layers on top of
-        this later. Restrict to one level with `level` (e.g. 6 for national
-        industries only).
+    def search(self, text: str, level: int | None = None, limit: int = 40) -> list[NaicsNode]:
+        """Rank matches: exact code, title-prefix, whole-phrase, then all-tokens.
+
+        Matches the code exactly, the title as a prefix or substring, and — so
+        multi-word queries land in any order ("air transport", "transport air")
+        — every query token appearing somewhere in the title. A tiny alias map
+        rescues common words whose NAICS wording differs ("airline"). Restrict
+        to one level with `level`; capped at `limit` for autocomplete.
         """
         q = text.strip().lower()
         if not q:
             return []
-        hits = []
+        aliased = self._ALIASES.get(q, q)
+        tokens = aliased.split()
+
+        scored: list[tuple[tuple, NaicsNode]] = []
         for node in self._by_code.values():
             if level is not None and node.level != level:
                 continue
             t = node.title.lower()
-            if q == node.code or q in t:
-                hits.append(node)
-
-        def rank(node: NaicsNode):
-            t = node.title.lower()
             if q == node.code:
-                return (0, node.code)
-            if t.startswith(q):
-                return (1, node.code)
-            return (2, node.code)
+                rank = 0
+            elif t.startswith(aliased):
+                rank = 1
+            elif aliased in t:
+                rank = 2
+            elif tokens and all(tok in t for tok in tokens):
+                rank = 3
+            else:
+                continue
+            # Within a rank, prefer more specific (deeper) industries, then code.
+            scored.append(((rank, -node.level, node.code), node))
 
-        return sorted(hits, key=rank)
+        scored.sort(key=lambda s: s[0])
+        return [node for _, node in scored[:limit]]
 
 
 def load(path: Path | None = None) -> Naics:

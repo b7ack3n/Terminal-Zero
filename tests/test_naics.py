@@ -82,6 +82,15 @@ class TestRegistry(unittest.TestCase):
         # exact code beats title match
         self.assertEqual(self.n.search("334413")[0].code, "334413")
 
+    def test_search_tokens_any_order(self):
+        # multi-word query lands even when the words aren't contiguous/ordered
+        self.assertTrue(any(h.code == "111335" for h in self.n.search("nut tree")))
+
+    def test_search_alias_rescues_colloquial_term(self):
+        # "chips" -> "semiconductor" via the alias map
+        hits = self.n.search("chips")
+        self.assertTrue(any("Semiconductor" in h.title for h in hits))
+
     def test_sectors_and_industries(self):
         self.assertEqual({s.code for s in self.n.sectors()}, {"11", "31-33"})
         self.assertEqual(
