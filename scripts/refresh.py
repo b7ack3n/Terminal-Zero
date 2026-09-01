@@ -11,10 +11,11 @@ built for it (idempotent, gap-tolerant, vintage-stamped); this driver just asks
 every source for a rolling window ending now.
 """
 
+import os
 import sys
 from datetime import date
 
-from terminal_zero import industry
+from terminal_zero import fred, industry, registry
 from terminal_zero.bea import gdp, io
 from terminal_zero.bls import qcew
 from terminal_zero.census import bfs, cbp, trade
@@ -31,9 +32,13 @@ def _latest(conn, subject, concept="gross_output", col="fiscal_year"):
 
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else "semiconductors"
-    m = industry.resolve(name)
+    # Resolve through the registry: a curated industry keeps its vetted mapping;
+    # any other name or NAICS code is derived from the backbone + crosswalks.
+    m = registry.mapping_for(name)
     if not m:
-        raise SystemExit(f"unknown industry {name!r}; known: {', '.join(industry.INDUSTRY_SIC)}")
+        raise SystemExit(
+            f"could not resolve {name!r}. Try a NAICS code (e.g. 334413) or a name "
+            f"the backbone knows. Curated industries: {', '.join(industry.INDUSTRY_SIC)}")
 
     naics = m.naics[0] if m.naics else None
     now = date.today().year
@@ -107,6 +112,22 @@ def main() -> None:
         for commodity in m.nass:
             insert_observations(conn, nass.commodity_observations(fetcher, commodity, range(now - 6, now + 1)))
         report.append(("NASS", ", ".join(m.nass)))
+
+    # FRED — producer prices (BLS PPI via FRED), 6-digit industries only.
+    # A candidate series (PCU<naics><naics>); if it doesn't exist FRED returns
+    # nothing and we skip, per the "verify at fetch" discipline.
+    if naics and len(naics) == 6 and os.environ.get("FRED_API_KEY"):
+        series = f"PCU{naics}{naics}"
+        try:
+            obs = fred.series_observations(
+                fetcher, series, concept="ppi_industry", unit="index",
+                measure_type="stock", frequency="M", primary="BLS PPI",
+                observation_start=f"{now - 6}-01-01")
+            if obs:
+                insert_observations(conn, obs)
+                report.append(("FRED PPI", obs[-1].period_end[:7]))
+        except Exception:
+            pass
 
     print(f"refreshed '{name}' (as of {date.today()}): store {before:,} -> {count(conn):,}")
     for src, v in report:

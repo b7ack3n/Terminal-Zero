@@ -191,6 +191,19 @@ def _trade_partners(conn, hs):
     return {"year": year, "exports": top("exports"), "imports": top("imports")}
 
 
+def _ppi(conn, naics):
+    """Producer price index for the industry (BLS PPI via FRED), if loaded."""
+    rows = conn.execute(
+        "SELECT period_end, value FROM observations WHERE subject_id=? "
+        "AND concept='ppi_industry' ORDER BY period_end",
+        (f"FRED:PCU{naics}{naics}",)).fetchall()
+    if len(rows) < 6:
+        return None
+    vals = [r[1] for r in rows]
+    return {"values": vals, "latest": vals[-1], "first": vals[0],
+            "latest_date": rows[-1][0][:7], "first_date": rows[0][0][:7]}
+
+
 def _provenance(conn, subject_id):
     row = conn.execute(
         "SELECT MIN(retrieved_at) AS first, MAX(retrieved_at) AS last, licence_class "
@@ -465,6 +478,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     trade = _trade(conn, hs)
     partners = _trade_partners(conn, hs)
     prov = _provenance(conn, subject)
+    ppi = _ppi(conn, naics)
     retrieved = (prov.get("last") or "")[:10]
 
     ex_counter = [0]
@@ -492,6 +506,8 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     if trade:
         latest_month = trade["months"][-1]["period_end"][:7]
         vintages.append(f"Trade {latest_month}")
+    if ppi:
+        vintages.append(f"PPI {ppi['latest_date']}")
 
     # ---- Section 1: market size & growth --------------------------------
     # Prefer an industry-appropriate size: ag value of production (NASS) if
@@ -547,10 +563,19 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
                 _hbars(_top_states(conn, subject, y1), _int, " employees"),
                 "BLS QCEW, private ownership. Top 8 states.")
 
+    ppi_ex = ""
+    if ppi:
+        chg = (ppi["latest"] / ppi["first"] - 1) if ppi["first"] else 0
+        ppi_ex = ex(f"Producer prices, {ppi['first_date']}–{ppi['latest_date']}",
+                    _sparkline(ppi["values"]),
+                    f"BLS Producer Price Index (via FRED). Index {ppi['first']:.1f} → "
+                    f"{ppi['latest']:.1f} ({chg:+.1%} over the window).")
+
     section1 = ("<section>" + _section("01", "Market size & growth",
                 "How large the industry is, and how fast it is moving. Value of production "
                 "and output; employment, wages and establishments from the QCEW near-census "
-                "of covered employers.") + headline + figband + nass_ex + ex_index + ex_geo + "</section>")
+                "of covered employers.") + headline + figband + nass_ex + ex_index + ex_geo
+                + ppi_ex + "</section>")
 
     # ---- Section 2: competitive structure -------------------------------
     struct_parts = [_section("02", "Competitive structure",
