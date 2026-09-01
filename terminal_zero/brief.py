@@ -1,11 +1,17 @@
-"""Render a room as an industry brief (HTML).
+"""Render a room as a framework-structured industry analysis brief (HTML).
 
-"A report is one rendering of a room." Every figure here is pulled from the
-store via the room — nothing is hand-typed. The charts are computed from the
-observation values, so the brief cannot drift from its sources.
+"A report is one rendering of a room." The brief is organised the way an
+analyst would structure it — industry sizing, key players, competitive forces
+(Porter's Five Forces), market constraints — and every figure is pulled from
+the store, never hand-typed.
 
-Output is a self-contained HTML fragment (title + fonts + styles + markup),
-suitable for publishing as an Artifact.
+Sections split into two kinds:
+  * DATA-BACKED (Industry sizing from QCEW, Key players from EDGAR): fully
+    cited, computed from observations / resolved entities.
+  * SCAFFOLD (Five Forces, Market constraints): the framework is laid out and
+    each force names the data that will drive it, marked clearly as pending —
+    we show the structure without fabricating analysis the data can't yet
+    support. The AI narrative and the extra sources fill these in later.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from terminal_zero import geo, room
 # ---- data assembly (all numbers come from the store) ---------------------
 
 
-def _us_series(conn: sqlite3.Connection, subject_id: str) -> list[dict]:
+def _us_series(conn, subject_id):
     rows = conn.execute(
         """
         SELECT fiscal_year AS year,
@@ -32,7 +38,7 @@ def _us_series(conn: sqlite3.Connection, subject_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _top_states(conn, subject_id, year, limit=8) -> list[dict]:
+def _top_states(conn, subject_id, year, limit=8):
     rows = conn.execute(
         """
         SELECT geo, value FROM observations
@@ -45,13 +51,10 @@ def _top_states(conn, subject_id, year, limit=8) -> list[dict]:
     return [{"label": geo.label(r["geo"]), "value": r["value"]} for r in rows]
 
 
-def _provenance(conn, subject_id) -> dict:
+def _provenance(conn, subject_id):
     row = conn.execute(
-        """
-        SELECT MIN(retrieved_at) AS first, MAX(retrieved_at) AS last,
-               source, licence_class
-        FROM observations WHERE subject_id=?
-        """,
+        "SELECT MIN(retrieved_at) AS first, MAX(retrieved_at) AS last, "
+        "source, licence_class FROM observations WHERE subject_id=?",
         (subject_id,),
     ).fetchone()
     return dict(row) if row else {}
@@ -59,26 +62,20 @@ def _provenance(conn, subject_id) -> dict:
 
 # ---- formatting ----------------------------------------------------------
 
-
-def _int(v) -> str:
-    return f"{v:,.0f}"
-
-
-def _usd_b(v) -> str:
-    return f"${v / 1e9:,.1f}B"
+def _int(v): return f"{v:,.0f}"
+def _usd_b(v): return f"${v / 1e9:,.1f}B"
 
 
-def _pct(first, last) -> str:
+def _pct(first, last):
     if not first:
         return "—"
-    p = (last - first) / first * 100
-    return f"{p:+.1f}%"
+    return f"{(last - first) / first * 100:+.1f}%"
 
 
 # ---- svg marks (computed from data) --------------------------------------
 
 
-def _sparkline(values: list[float]) -> str:
+def _sparkline(values):
     w, h, pad = 220, 56, 6
     lo, hi = min(values), max(values)
     span = (hi - lo) or 1
@@ -89,14 +86,12 @@ def _sparkline(values: list[float]) -> str:
     area = f"{xs[0]:.1f},{h - pad} " + line + f" {xs[-1]:.1f},{h - pad}"
     return (
         f'<svg class="spark" viewBox="0 0 {w} {h}" preserveAspectRatio="none" '
-        f'role="img" aria-hidden="true">'
-        f'<polygon class="spark-area" points="{area}"/>'
-        f'<polyline class="spark-line" points="{line}"/>'
-        f"</svg>"
+        f'role="img" aria-hidden="true"><polygon class="spark-area" points="{area}"/>'
+        f'<polyline class="spark-line" points="{line}"/></svg>'
     )
 
 
-def _bars(rows: list[dict]) -> str:
+def _bars(rows):
     w, barh, gap, labelw, valuew = 660, 28, 12, 150, 96
     trackx = labelw + 10
     trackw = w - trackx - valuew
@@ -107,27 +102,96 @@ def _bars(rows: list[dict]) -> str:
         y = i * (barh + gap)
         bw = trackw * r["value"] / maxv
         mid = y + barh / 2
-        parts.append(
-            f'<text class="bar-label" x="{labelw}" y="{mid}" text-anchor="end" '
-            f'dominant-baseline="central">{r["label"]}</text>'
-        )
-        parts.append(
-            f'<rect class="bar-track" x="{trackx}" y="{y}" width="{trackw}" '
-            f'height="{barh}" rx="4"/>'
-        )
-        parts.append(
-            f'<rect class="bar" x="{trackx}" y="{y}" width="{bw:.1f}" height="{barh}" '
-            f'rx="4"><title>{r["label"]}: {_int(r["value"])} employees</title></rect>'
-        )
-        parts.append(
-            f'<text class="bar-value" x="{trackx + bw + 8:.1f}" y="{mid}" '
-            f'dominant-baseline="central">{_int(r["value"])}</text>'
-        )
+        parts.append(f'<text class="bar-label" x="{labelw}" y="{mid}" text-anchor="end" dominant-baseline="central">{r["label"]}</text>')
+        parts.append(f'<rect class="bar-track" x="{trackx}" y="{y}" width="{trackw}" height="{barh}" rx="4"/>')
+        parts.append(f'<rect class="bar" x="{trackx}" y="{y}" width="{bw:.1f}" height="{barh}" rx="4"><title>{r["label"]}: {_int(r["value"])} employees</title></rect>')
+        parts.append(f'<text class="bar-value" x="{trackx + bw + 8:.1f}" y="{mid}" dominant-baseline="central">{_int(r["value"])}</text>')
     parts.append("</svg>")
     return "".join(parts)
 
 
-# ---- the page ------------------------------------------------------------
+# ---- section builders ----------------------------------------------------
+
+
+def _section_head(num, title):
+    return f'<div class="sect-head"><span class="sect-num">{num}</span><h2>{title}</h2></div>'
+
+
+def _key_players_section(num, key_players):
+    body = ""
+    if not key_players or not key_players.get("players"):
+        body = (
+            '<p class="empty">No public companies are classified in this industry '
+            "under EDGAR — a sign the industry is largely private. Coverage of "
+            "private players comes from the sizing sources, not company filings.</p>"
+        )
+        cite = ""
+    else:
+        players = sorted(key_players["players"], key=lambda p: (p["name"] or ""))
+        shown = players[:15]
+        rows = "".join(
+            f'<tr><td class="tk">{p["ticker"] or "—"}</td><td>{p["name"]}</td>'
+            f'<td class="ck">CIK{p["cik"]}</td></tr>'
+            for p in shown
+        )
+        body = (
+            '<table class="players"><thead><tr><th>Ticker</th><th>Company</th>'
+            '<th>Filer</th></tr></thead><tbody>' + rows + "</tbody></table>"
+        )
+        total = key_players["total_named"]
+        more = f" Showing 15 of {total} public filers with identifiable tickers." if total > 15 else ""
+        body += (
+            f'<p class="cap">Public companies classified in SIC {key_players["sic"]} '
+            f"(EDGAR).{more} Ranking by revenue is a pending enrichment.</p>"
+        )
+        cite = key_players
+    return f'<section>{_section_head(num, "Key players")}{body}</section>', cite
+
+
+FORCES = [
+    ("Competitive rivalry",
+     "Number of players and market concentration — establishment counts (QCEW/CBP) and size distribution (CBP)."),
+    ("Threat of new entrants",
+     "Capital intensity and establishment birth/death rates (Census Business Formation Statistics)."),
+    ("Threat of substitutes",
+     "Output and pricing of adjacent industries (BEA industry accounts, trade)."),
+    ("Supplier power",
+     "Upstream input costs and concentration (BEA input-output, trade in components)."),
+    ("Buyer power",
+     "Downstream demand concentration and export dependence (Census / USITC trade)."),
+]
+
+
+def _forces_section(num):
+    cards = "".join(
+        f'<div class="force"><span class="force-k">{name}</span>'
+        f"<p>{driver}</p><span class=\"pending\">Awaiting data + AI analysis</span></div>"
+        for name, driver in FORCES
+    )
+    return (
+        f'<section>{_section_head(num, "Competitive forces")}'
+        '<p class="sect-lede">Porter\'s Five Forces. Each force names the data that '
+        "will drive it; the analysis is written by the model over that data, with "
+        'every figure cited.</p>'
+        f'<div class="forces">{cards}</div></section>'
+    )
+
+
+def _constraints_section(num):
+    items = [
+        ("Trade exposure", "Import penetration and export dependence (Census / USITC trade, by HS code)."),
+        ("Input sensitivity", "Cost and availability of key inputs (BEA input-output)."),
+        ("Labor availability", "Employment levels, wages, and geographic concentration (QCEW — partially available)."),
+    ]
+    rows = "".join(
+        f'<div class="force"><span class="force-k">{k}</span><p>{v}</p>'
+        '<span class="pending">Awaiting data + AI analysis</span></div>'
+        for k, v in items
+    )
+    return f'<section>{_section_head(num, "Market constraints")}<div class="forces">{rows}</div></section>'
+
+
+# ---- styles --------------------------------------------------------------
 
 STYLE = """
 <style>
@@ -135,120 +199,142 @@ STYLE = """
   --bg:#F5F7FA; --surface:#FFFFFF; --ink:#14181F; --muted:#5B6673;
   --faint:#8A94A2; --line:#E3E8EF; --track:#EDF1F6;
   --accent:#0E7C86; --accent-ink:#0B5F67; --accent-fill:rgba(14,124,134,.14);
+  --pending:#B06A17; --pending-bg:rgba(176,106,23,.10);
 }
-:root:not([data-theme="light"]){ }
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
     --bg:#0C0F14; --surface:#12161D; --ink:#E7ECF3; --muted:#9BA6B4;
     --faint:#6B7686; --line:#232A34; --track:#1B2129;
     --accent:#3FB6C4; --accent-ink:#7FD4DE; --accent-fill:rgba(63,182,196,.16);
+    --pending:#E0A85B; --pending-bg:rgba(224,168,91,.12);
   }
 }
 :root[data-theme="dark"]{
   --bg:#0C0F14; --surface:#12161D; --ink:#E7ECF3; --muted:#9BA6B4;
   --faint:#6B7686; --line:#232A34; --track:#1B2129;
   --accent:#3FB6C4; --accent-ink:#7FD4DE; --accent-fill:rgba(63,182,196,.16);
+  --pending:#E0A85B; --pending-bg:rgba(224,168,91,.12);
 }
 *{box-sizing:border-box}
-body{
-  background:var(--bg); color:var(--ink);
-  font-family:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
-  line-height:1.55; -webkit-font-smoothing:antialiased;
-}
+body{background:var(--bg);color:var(--ink);
+  font-family:"IBM Plex Sans",system-ui,sans-serif;line-height:1.55;
+  -webkit-font-smoothing:antialiased}
 .wrap{max-width:900px;margin:0 auto;padding:56px 28px 80px}
-.mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
-.eyebrow{
-  font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.22em;
-  text-transform:uppercase;color:var(--accent-ink);margin:0 0 14px
-}
-h1{
-  font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--accent-ink);margin:0 0 14px}
+h1{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;
   font-size:clamp(2rem,4.2vw,2.9rem);line-height:1.08;letter-spacing:-.01em;
-  text-wrap:balance;margin:0 0 12px
-}
+  text-wrap:balance;margin:0 0 12px}
 .dek{color:var(--muted);font-size:1.05rem;max-width:60ch;margin:0}
-.masthead{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:8px}
-.coverage{
-  font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--faint);
-  margin-top:18px;display:flex;flex-wrap:wrap;gap:6px 22px
-}
+.masthead{border-bottom:1px solid var(--line);padding-bottom:26px}
+.coverage{font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--faint);
+  margin-top:18px;display:flex;flex-wrap:wrap;gap:6px 22px}
 .coverage b{color:var(--muted);font-weight:500}
-section{margin-top:44px}
-.label{
-  font-family:"IBM Plex Mono",monospace;font-size:.74rem;letter-spacing:.16em;
-  text-transform:uppercase;color:var(--faint);margin:0 0 18px;
-  display:flex;align-items:center;gap:12px
-}
-.label::after{content:"";flex:1;height:1px;background:var(--line)}
+section{margin-top:52px}
+.sect-head{display:flex;align-items:baseline;gap:14px;margin:0 0 8px;
+  padding-bottom:14px;border-bottom:1px solid var(--line)}
+.sect-num{font-family:"IBM Plex Mono",monospace;font-size:.9rem;color:var(--accent-ink);
+  font-weight:500}
+.sect-head h2{font-family:"IBM Plex Serif",Georgia,serif;font-weight:600;
+  font-size:1.5rem;margin:0;letter-spacing:-.01em}
+.sect-lede{color:var(--muted);max-width:64ch;margin:16px 0 22px}
+.label{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--faint);margin:22px 0 16px}
 .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
 @media(max-width:680px){.tiles{grid-template-columns:1fr}}
-.tile{
-  background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  padding:20px 20px 14px;display:flex;flex-direction:column;gap:2px
-}
-.tile .k{font-family:"IBM Plex Mono",monospace;font-size:.72rem;
-  letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:20px 20px 14px;display:flex;flex-direction:column;gap:2px}
+.tile .k{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted)}
 .tile .v{font-family:"IBM Plex Mono",monospace;font-size:1.7rem;font-weight:600;
   font-variant-numeric:tabular-nums;letter-spacing:-.01em;margin-top:4px}
-.tile .chg{font-family:"IBM Plex Mono",monospace;font-size:.8rem;
-  color:var(--accent-ink);font-variant-numeric:tabular-nums}
+.tile .chg{font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--accent-ink);
+  font-variant-numeric:tabular-nums}
 .spark{display:block;width:100%;height:58px;margin-top:14px}
 .spark-area{fill:var(--accent-fill)}
-.spark-line{fill:none;stroke:var(--accent);stroke-width:2;
-  stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.spark-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linecap:round;
+  stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.chartcard{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:24px}
 .bars{width:100%;height:auto}
 .bar-track{fill:var(--track)}
 .bar{fill:var(--accent)}
 .bar-label{font-family:"IBM Plex Sans",sans-serif;font-size:13px;fill:var(--ink)}
-.bar-value{font-family:"IBM Plex Mono",monospace;font-size:12.5px;
-  fill:var(--muted);font-variant-numeric:tabular-nums}
-.chartcard{background:var(--surface);border:1px solid var(--line);
-  border-radius:10px;padding:24px}
-.chartcard .cap{font-family:"IBM Plex Mono",monospace;font-size:.74rem;
-  color:var(--faint);margin:16px 0 0}
+.bar-value{font-family:"IBM Plex Mono",monospace;font-size:12.5px;fill:var(--muted);
+  font-variant-numeric:tabular-nums}
+.cap{font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--faint);
+  margin:16px 0 0}
+.players{width:100%;border-collapse:collapse;font-size:.92rem}
+.players th{text-align:left;font-family:"IBM Plex Mono",monospace;font-size:.7rem;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:500;
+  padding:0 0 10px;border-bottom:1px solid var(--line)}
+.players td{padding:11px 0;border-bottom:1px solid var(--line)}
+.players .tk{font-family:"IBM Plex Mono",monospace;color:var(--accent-ink);font-weight:500}
+.players .ck{font-family:"IBM Plex Mono",monospace;color:var(--faint);font-size:.78rem}
+.empty{color:var(--muted);max-width:60ch}
+.forces{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:22px}
+@media(max-width:680px){.forces{grid-template-columns:1fr}}
+.force{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:18px 18px 16px;display:flex;flex-direction:column;gap:8px}
+.force-k{font-family:"IBM Plex Sans",sans-serif;font-weight:600;font-size:1rem}
+.force p{margin:0;color:var(--muted);font-size:.88rem;flex:1}
+.pending{align-self:flex-start;font-family:"IBM Plex Mono",monospace;font-size:.66rem;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--pending);
+  background:var(--pending-bg);padding:4px 8px;border-radius:5px}
 .prov{background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  padding:22px 24px;font-size:.9rem;color:var(--muted)}
-.prov h3{font-family:"IBM Plex Mono",monospace;font-size:.74rem;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--faint);margin:0 0 12px;font-weight:500}
+  padding:22px 24px}
+.prov h3{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--faint);margin:0 0 14px;font-weight:500}
 .prov dl{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:0}
-.prov dt{font-family:"IBM Plex Mono",monospace;color:var(--faint);font-size:.8rem}
-.prov dd{margin:0;font-family:"IBM Plex Mono",monospace;font-size:.8rem;
-  color:var(--ink);word-break:break-all}
-.foot{margin-top:40px;padding-top:20px;border-top:1px solid var(--line);
+.prov dt{font-family:"IBM Plex Mono",monospace;color:var(--faint);font-size:.78rem}
+.prov dd{margin:0;font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--ink);
+  word-break:break-all}
+.foot{margin-top:44px;padding-top:20px;border-top:1px solid var(--line);
   font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--faint);
   display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
 </style>
 """
 
 
-def render(conn: sqlite3.Connection, naics: str, title: str) -> str:
+def render(conn: sqlite3.Connection, naics: str, title: str, key_players=None) -> str:
     subject = f"NAICS:{naics}"
     series = _us_series(conn, subject)
     if not series:
         raise ValueError(f"no observations for {subject} — load data first")
     first, last = series[0], series[-1]
-    year0, year1 = first["year"], last["year"]
-    top = _top_states(conn, subject, year1)
+    y0, y1 = first["year"], last["year"]
+    top = _top_states(conn, subject, y1)
     prov = _provenance(conn, subject)
     cov = room.summary(conn, room.RoomDefinition(name="_", subject_ids=[subject]))
 
-    estabs = [s["estabs"] for s in series]
-    emp = [s["emp"] for s in series]
-    wages = [s["wages"] for s in series]
-
     tiles = [
-        ("Establishments", _int(last["estabs"]), _pct(first["estabs"], last["estabs"]), _sparkline(estabs)),
-        ("Employment", _int(last["emp"]), _pct(first["emp"], last["emp"]), _sparkline(emp)),
-        ("Total annual wages", _usd_b(last["wages"]), _pct(first["wages"], last["wages"]), _sparkline(wages)),
+        ("Establishments", _int(last["estabs"]), _pct(first["estabs"], last["estabs"]), _sparkline([s["estabs"] for s in series])),
+        ("Employment", _int(last["emp"]), _pct(first["emp"], last["emp"]), _sparkline([s["emp"] for s in series])),
+        ("Total annual wages", _usd_b(last["wages"]), _pct(first["wages"], last["wages"]), _sparkline([s["wages"] for s in series])),
     ]
     tiles_html = "".join(
-        f'<div class="tile"><span class="k">{k}</span>'
-        f'<span class="v">{v}</span>'
-        f'<span class="chg">{chg} since {year0}</span>{spark}</div>'
+        f'<div class="tile"><span class="k">{k}</span><span class="v">{v}</span>'
+        f'<span class="chg">{chg} since {y0}</span>{spark}</div>'
         for k, v, chg, spark in tiles
     )
 
+    players_section, players_cite = _key_players_section("II", key_players)
     retrieved = (prov.get("last") or "")[:10]
+
+    # Provenance rows — list every source the brief actually drew on.
+    prov_rows = [
+        ("Sizing source", f"{prov.get('source', '')} · Quarterly Census of Employment and Wages"),
+        ("Sizing endpoint", f"https://data.bls.gov/cew/data/api/&lt;year&gt;/a/industry/{naics}.csv"),
+    ]
+    if players_cite:
+        prov_rows.append(("Key players source", "sec-edgar · company classification by SIC"))
+        prov_rows.append(("Key players endpoint", f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&SIC={players_cite['sic']}"))
+    prov_rows += [
+        ("Licence", prov.get("licence_class", "")),
+        ("Retrieved", retrieved),
+        ("Scope", "Private ownership; U.S. + states; suppressed cells omitted"),
+    ]
+    prov_html = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in prov_rows)
 
     return f"""<title>{title}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -257,47 +343,39 @@ def render(conn: sqlite3.Connection, naics: str, title: str) -> str:
 {STYLE}
 <div class="wrap">
   <header class="masthead">
-    <p class="eyebrow">Terminal Zero · Industry Brief</p>
+    <p class="eyebrow">Terminal Zero · Industry Analysis</p>
     <h1>{title}</h1>
-    <p class="dek">A provenance-first snapshot of the U.S. semiconductor
-      manufacturing industry. Every figure is drawn from a cited source and can
-      be traced to the observation it came from.</p>
+    <p class="dek">A framework-structured brief. The analysis is organised the way
+      an analyst would build it — sizing, players, forces, constraints — and every
+      figure traces to a cited source in the store.</p>
     <div class="coverage">
       <span><b>NAICS</b> {naics}</span>
-      <span><b>Period</b> {year0}–{year1}</span>
+      <span><b>Period</b> {y0}–{y1}</span>
       <span><b>Geographies</b> {cov['geos']}</span>
       <span><b>Observations</b> {cov['observations']}</span>
-      <span><b>Source</b> {', '.join(cov['sources'])}</span>
+      <span><b>Sources</b> {', '.join(cov['sources'])}{', sec-edgar' if players_cite else ''}</span>
     </div>
   </header>
 
   <section>
-    <p class="label">Key figures · {year1}</p>
+    {_section_head("I", "Industry sizing")}
+    <p class="label">Key figures · {y1}</p>
     <div class="tiles">{tiles_html}</div>
-  </section>
-
-  <section>
-    <p class="label">Geographic concentration · employment, {year1}</p>
-    <div class="chartcard">
-      {_bars(top)}
+    <p class="label">Geographic concentration · employment, {y1}</p>
+    <div class="chartcard">{_bars(top)}
       <p class="cap">Top {len(top)} states by average annual employment, private
-        ownership. Source: BLS QCEW.</p>
-    </div>
+        ownership. Source: BLS QCEW.</p></div>
   </section>
 
+  {players_section}
+
+  {_forces_section("III")}
+
+  {_constraints_section("IV")}
+
   <section>
-    <p class="label">Provenance</p>
-    <div class="prov">
-      <h3>How to trace these numbers</h3>
-      <dl>
-        <dt>Source</dt><dd>{prov.get('source','')}</dd>
-        <dt>Dataset</dt><dd>Quarterly Census of Employment and Wages (annual)</dd>
-        <dt>Endpoint</dt><dd>https://data.bls.gov/cew/data/api/&lt;year&gt;/a/industry/{naics}.csv</dd>
-        <dt>Licence</dt><dd>{prov.get('licence_class','')}</dd>
-        <dt>Retrieved</dt><dd>{retrieved}</dd>
-        <dt>Scope</dt><dd>Private ownership; U.S. + states; suppressed cells omitted</dd>
-      </dl>
-    </div>
+    {_section_head("V", "Provenance")}
+    <div class="prov"><h3>How to trace these numbers</h3><dl>{prov_html}</dl></div>
   </section>
 
   <div class="foot">
