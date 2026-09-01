@@ -40,7 +40,10 @@ def size_url(naics: str, year: int) -> str:
 
 
 def _rows(text: str):
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}, []                              # no CBP coverage (e.g. farms) — a gap
     header = data[0]
     return {h: i for i, h in enumerate(header)}, data[1:]
 

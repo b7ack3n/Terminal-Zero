@@ -31,6 +31,7 @@ class IndustryMapping:
     hs_note: str = ""                                 # honest scope of the HS match
     bfs: str = ""                                      # BFS sector code (new entrants)
     bfs_note: str = ""                                # honest scope of the BFS match
+    nass: list[str] = field(default_factory=list)      # USDA NASS commodities (ag production)
     note: str = ""
 
 
@@ -61,6 +62,14 @@ INDUSTRY_SIC: dict[str, IndustryMapping] = {
         name="tree nuts",
         sic=[],
         naics=["111335"],
+        bea=["111CA"],
+        bea_note="BEA 'Farms' — all U.S. agriculture, a very broad superset; the "
+                 "industry-specific size is USDA value of production.",
+        hs=["0802"],
+        hs_note="HS 0802 'Nuts, fresh or dried' (almonds, walnuts, pistachios, etc.).",
+        bfs="NAICS11",
+        bfs_note="all Agriculture (BFS sector) — a broad superset.",
+        nass=["ALMONDS", "WALNUTS", "PISTACHIOS", "PECANS"],
         note=(
             "No clean EDGAR coverage. SIC 2068 (Salted & Roasted Nuts & Seeds) "
             "and 0173 (Tree Nuts, farming) have zero public 10-K filers. The one "

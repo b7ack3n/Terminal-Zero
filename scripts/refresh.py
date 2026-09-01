@@ -18,6 +18,7 @@ from terminal_zero import industry
 from terminal_zero.bea import gdp, io
 from terminal_zero.bls import qcew
 from terminal_zero.census import bfs, cbp, trade
+from terminal_zero.usda import nass
 from terminal_zero.edgar.fetcher import Fetcher
 from terminal_zero.store import connect, count, insert_observations
 
@@ -98,6 +99,12 @@ def main() -> None:
         latest = conn.execute("SELECT MAX(period_end) FROM observations WHERE subject_id=?",
                               (f"BFS:{m.bfs}",)).fetchone()[0]
         report.append(("BFS", latest))
+
+    # USDA NASS — agricultural production per commodity (for ag industries).
+    if m.nass:
+        for commodity in m.nass:
+            insert_observations(conn, nass.commodity_observations(fetcher, commodity, range(now - 6, now + 1)))
+        report.append(("NASS", ", ".join(m.nass)))
 
     print(f"refreshed '{name}' (as of {date.today()}): store {before:,} -> {count(conn):,}")
     for src, v in report:

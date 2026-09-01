@@ -37,7 +37,10 @@ def _month_end(year: int, month: int) -> str:
 
 def parse_trade(text, *, direction, hs, source, source_url, retrieved_at, licence_class):
     value_field = _DIRS[direction][1]
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
     idx = {h: i for i, h in enumerate(data[0])}
     out = []
     for r in data[1:]:

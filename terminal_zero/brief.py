@@ -65,6 +65,25 @@ def _bea_latest_quarter(conn, bea_industry):
     return dict(r) if r else None
 
 
+def _nass(conn, commodities):
+    """Latest value of production ($) per commodity, from USDA NASS."""
+    if not commodities:
+        return None
+    items = []
+    for c in commodities:
+        r = conn.execute(
+            "SELECT fiscal_year, value FROM observations WHERE subject_id=? AND unit='$' "
+            "AND concept LIKE '%PRODUCTION%' ORDER BY fiscal_year DESC, value DESC LIMIT 1",
+            (f"NASS:{c.upper()}",)).fetchone()
+        if r:
+            items.append({"commodity": c.title(), "value": r[1], "year": r[0]})
+    if not items:
+        return None
+    items.sort(key=lambda x: x["value"], reverse=True)
+    return {"items": items, "total": sum(i["value"] for i in items),
+            "year": max(i["year"] for i in items)}
+
+
 def _bfs(conn, category):
     """New-business applications by full year (sector-level), latest first."""
     if not category:
@@ -401,7 +420,7 @@ section{margin-top:64px}
 
 
 def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
-           hs=None, hs_note="", bfs=None, bfs_note="") -> str:
+           hs=None, hs_note="", bfs=None, bfs_note="", nass=None) -> str:
     subject = f"NAICS:{naics}"
     series = _us_series(conn, subject)
     if not series:
@@ -420,13 +439,21 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     bea_q = _bea_latest_quarter(conn, bea_industry)
     io = _io(conn, bea_industry)
     bfs_data = _bfs(conn, bfs)
+    nass_data = _nass(conn, nass)
     cbp = _cbp(conn, naics)
     trade = _trade(conn, hs)
     prov = _provenance(conn, subject)
     retrieved = (prov.get("last") or "")[:10]
 
+    ex_counter = [0]
+    def ex(title, body, source):
+        ex_counter[0] += 1
+        return _exhibit(ex_counter[0], title, body, source)
+
     # ---- cover meta / freshness -----------------------------------------
     vintages = [f"QCEW {y1}"]
+    if nass_data:
+        vintages.append(f"NASS {nass_data['year']}")
     if bea_q:
         vintages.append(f"BEA {bea_q['fiscal_year']} {bea_q['fiscal_period']}")
     elif bea:
@@ -445,7 +472,18 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         vintages.append(f"Trade {latest_month}")
 
     # ---- Section 1: market size & growth --------------------------------
-    if bea:
+    # Prefer an industry-appropriate size: ag value of production (NASS) if
+    # present, else BEA sector gross output.
+    if nass_data:
+        top = ", ".join(f'{i["commodity"]} {_usd_b(i["value"])}' for i in nass_data["items"][:3])
+        bea_ref = (f" BEA 'Farms' output ({_usd_b0(bea[-1]['value'])}) covers all U.S. "
+                   "agriculture and is far broader.") if bea else ""
+        headline = (
+            '<div class="headline"><div class="k">Value of production · '
+            f'{nass_data["year"]}</div><div class="big serif">{_usd_b(nass_data["total"])}</div>'
+            f'<p class="note">USDA value of production across {len(nass_data["items"])} tree-nut '
+            f'commodities ({top}).{bea_ref} Source: USDA NASS.</p></div>')
+    elif bea:
         bf, bl = bea[0], bea[-1]
         bcagr = derive.apply("cagr", bf["value"], bl["value"], max(bl["year"]-bf["year"], 1))
         q_note = ""
@@ -472,19 +510,25 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         f'<div class="fig"><div class="k">{k}</div><div class="v">{v}</div>'
         f'<div class="c">{c} since {y0}</div>{sp}</div>' for k, v, c, sp in figs) + "</div>"
 
-    ex_index = _exhibit(1, f"Indexed growth, {y0}–{y1} ({y0} = 100)",
-                        _index_chart([s["year"] for s in series],
-                                     {"Wages": wages, "Estab.": estabs, "Employ.": emp}),
-                        f"BLS QCEW; growth via derivation cagr/index_to_base v1.0.0. "
-                        f"Wages rising faster than employment ⇒ pay per worker climbing.")
-    ex_geo = _exhibit(2, f"Employment by state, {y1}",
-                      _hbars(_top_states(conn, subject, y1), _int, " employees"),
-                      "BLS QCEW, private ownership. Top 8 states.")
+    nass_ex = ""
+    if nass_data:
+        nass_ex = ex(f"Value of production by commodity, {nass_data['year']}",
+                     _hbars([{"label": i["commodity"], "value": i["value"]} for i in nass_data["items"]],
+                            _usd_b, ""),
+                     "USDA NASS, value of utilized production.")
+    ex_index = ex(f"Indexed growth, {y0}–{y1} ({y0} = 100)",
+                  _index_chart([s["year"] for s in series],
+                               {"Wages": wages, "Estab.": estabs, "Employ.": emp}),
+                  "BLS QCEW; growth via derivation cagr/index_to_base v1.0.0. "
+                  "Wages rising faster than employment ⇒ pay per worker climbing.")
+    ex_geo = ex(f"Employment by state, {y1}",
+                _hbars(_top_states(conn, subject, y1), _int, " employees"),
+                "BLS QCEW, private ownership. Top 8 states.")
 
     section1 = ("<section>" + _section("01", "Market size & growth",
-                "How large the industry is, and how fast it is moving. Sector output "
-                "from BEA; employment, wages and establishments from the QCEW near-census "
-                "of covered employers.") + headline + figband + ex_index + ex_geo + "</section>")
+                "How large the industry is, and how fast it is moving. Value of production "
+                "and output; employment, wages and establishments from the QCEW near-census "
+                "of covered employers.") + headline + figband + nass_ex + ex_index + ex_geo + "</section>")
 
     # ---- Section 2: competitive structure -------------------------------
     struct_parts = [_section("02", "Competitive structure",
@@ -498,7 +542,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
             f'<p class="finding">Of <b>{_int(cbp["estabs"])}</b> establishments in '
             f'{cbp["year"]}, <b>{share:.0%}</b> employ 250 or more; <b>{_int(biggest)}</b> '
             f'employ 1,000+. A concentrated core sits above a long tail of small shops.</p>')
-        struct_parts.append(_exhibit(3, f"Establishments by employment size, {cbp['year']}",
+        struct_parts.append(ex(f"Establishments by employment size, {cbp['year']}",
                             _hbars([{"label": d["label"], "value": d["value"]} for d in cbp["dist"]],
                                    _int, " establishments"),
                             "Census County Business Patterns. CBP counts differ from QCEW "
@@ -507,7 +551,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         players = sorted(key_players["players"], key=lambda p: (p["name"] or ""))[:15]
         rows = "".join(f'<tr><td class="tk">{p["ticker"] or "—"}</td><td>{p["name"]}</td>'
                        f'<td class="ck">CIK{p["cik"]}</td></tr>' for p in players)
-        struct_parts.append(_exhibit(4, "Public companies in the industry",
+        struct_parts.append(ex("Public companies in the industry",
             '<table class="players"><thead><tr><th>Ticker</th><th>Company</th><th>Filer</th></tr>'
             f'</thead><tbody>{rows}</tbody></table>',
             f"SEC EDGAR, SIC {key_players['sic']}. 15 of {key_players['total_named']} public "
@@ -529,8 +573,8 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
             f'<b>{_usd_b(abs(bal))}</b> in {hs_note.split("—")[0].strip() if hs_note else "this product"}: '
             f'<b>{_usd_b(trade["exports"])}</b> exports against <b>{_usd_b(trade["imports"])}</b> '
             f'imports ({pen:.1f}× import cover).</p>' +
-            _exhibit(5, f"Monthly exports vs. imports, HS {hs}", _trade_chart(trade["months"]),
-                     f"Census international trade. {hs_note}") + "</section>")
+            ex(f"Monthly exports vs. imports, HS {hs}", _trade_chart(trade["months"]),
+               f"Census international trade. {hs_note}") + "</section>")
     else:
         section3 = ("<section>" + _section("03", "Trade exposure",
                     "Export orientation and import competition.") +
@@ -538,9 +582,9 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
 
     # ---- Section 4: five forces -----------------------------------------
     rivalry_live = bool(cbp and cbp["dist"])
-    io_parts, ex_no = [], 6
+    io_parts = []
     supplier_desc = "Upstream input costs and concentration (BEA input-output)."
-    buyer_desc = ("Trade data loaded (Exhibit 5): export dependence and import cover."
+    buyer_desc = ("Trade shows export dependence and import cover."
                   if trade else "Downstream demand concentration and export dependence.")
     supplier_tag = buyer_tag = "In development"
 
@@ -562,7 +606,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
             f'<p class="finding">Demand is <b>broad-based</b>: the largest customer ({top_buy}) '
             f'takes <b>{buy_share:.0%}</b> of output and exports absorb <b>{_usd_b0(io["exports"])}</b> '
             f'({exp_share:.0%}) — no dominant buyer, indicating <b>limited buyer power</b>.</p>')
-        io_parts.append(_exhibit(ex_no, f"Where the industry's output goes, {io['year']}",
+        io_parts.append(ex(f"Where the industry's output goes, {io['year']}",
                         _hbars([{"label": lbl, "value": v} for lbl, v in io["outputs"][:6]],
                                _usd_b, ""),
                         "BEA Input-Output, Use table. Top 6 destinations of gross output."))
@@ -577,7 +621,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
         apps_yoy = derive.apply("yoy", pv, lv)
         io_parts.append(
             f'<p class="finding">Establishments grew <b>{estab_cagr:+.1%}/yr</b> (net entry, QCEW), '
-            f'while manufacturing-wide new-business applications moved <b>{apps_yoy:+.0%}</b> in {ly} '
+            f'while sector-wide new-business applications moved <b>{apps_yoy:+.0%}</b> in {ly} '
             f'(BFS, sector-level). Yet fab-scale <b>capital intensity</b> keeps real entry barriers '
             f'high — a qualitative brake the counts understate.</p>')
         entrants_desc = f"Estabs {estab_cagr:+.1%}/yr; sector applications {apps_yoy:+.0%} {ly}."
@@ -585,7 +629,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
 
     forces = [
         ("Competitive rivalry",
-         ("Establishment size distribution (Exhibit 3): a concentrated core over a long tail."
+         ("Establishment size distribution shows a concentrated core over a long tail."
           if rivalry_live else "Awaiting concentration data."),
          "Backed by CBP" if rivalry_live else "In development"),
         ("Threat of new entrants", entrants_desc, entrants_tag),
@@ -605,6 +649,8 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     # ---- Section 5: provenance ------------------------------------------
     prov_rows = [("Data as of", " · ".join(vintages)),
                  ("Sizing", "BLS QCEW (employment, wages, establishments)")]
+    if nass_data:
+        prov_rows.append(("Value of production", "USDA NASS (value of utilized production)"))
     if bea:
         prov_rows.append(("Market size", "BEA GDP-by-Industry, gross output (TableID 15)"))
     if cbp:

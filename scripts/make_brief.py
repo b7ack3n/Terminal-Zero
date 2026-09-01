@@ -52,9 +52,10 @@ def main() -> None:
     hs_note = mapping.hs_note if mapping else ""
     bfs = mapping.bfs if mapping else ""
     bfs_note = mapping.bfs_note if mapping else ""
+    nass = mapping.nass if mapping else []
     html = brief.render(conn, naics, title, key_players=key_players,
                         bea_industry=bea_industry, bea_note=bea_note,
-                        hs=hs, hs_note=hs_note, bfs=bfs, bfs_note=bfs_note)
+                        hs=hs, hs_note=hs_note, bfs=bfs, bfs_note=bfs_note, nass=nass)
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
     n = key_players["total_named"] if key_players else 0

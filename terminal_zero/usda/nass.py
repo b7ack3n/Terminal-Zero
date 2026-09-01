@@ -32,7 +32,12 @@ def _num(raw: str):
 
 
 def parse_production(text, *, commodity, source, source_url, retrieved_at, licence_class):
-    rows = json.loads(text).get("data", [])
+    try:
+        rows = json.loads(text).get("data", [])
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(rows, list):
+        return []
     out = []
     for r in rows:
         value = _num(r.get("Value"))
