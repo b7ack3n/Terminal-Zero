@@ -63,6 +63,63 @@ def parse_trade(text, *, direction, hs, source, source_url, retrieved_at, licenc
     return out
 
 
+def partner_url(direction: str, hs: str, year: int) -> str:
+    endpoint, value_field, commodity_field = _DIRS[direction]
+    return (f"https://api.census.gov/data/timeseries/intltrade/{endpoint}/hs"
+            f"?get={value_field},{commodity_field},CTY_CODE&{commodity_field}={hs}&time={year}")
+
+
+def _is_country(code: str) -> bool:
+    # Individual countries: 4-digit numeric, not a grouping (00xx) or continent (xXXX).
+    return code.isdigit() and len(code) == 4 and not code.startswith("00")
+
+
+def parse_partners(text, *, direction, hs, source, source_url, retrieved_at, licence_class):
+    """Aggregate monthly by-country trade into annual totals per partner."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    idx = {h: i for i, h in enumerate(data[0])}
+    vf = _DIRS[direction][1]
+    totals: dict[tuple[str, int], float] = {}
+    for r in data[1:]:
+        code = r[idx["CTY_CODE"]]
+        if not _is_country(code):
+            continue
+        try:
+            v = float(r[idx[vf]])
+        except (ValueError, TypeError):
+            continue
+        year = int(r[idx["time"]][:4])
+        totals[(code, year)] = totals.get((code, year), 0.0) + v
+    return [
+        Observation(
+            subject_type="industry", subject_id=f"HS:{hs}", geo="US",
+            taxonomy="census-trade", concept=f"{direction}_country:{code}", unit="USD",
+            measure_type="flow", period_start=f"{year}-01-01", period_end=f"{year}-12-31",
+            fiscal_year=year, fiscal_period="A", value=v,
+            source=source, source_url=source_url, retrieved_at=retrieved_at,
+            licence_class=licence_class,
+        )
+        for (code, year), v in totals.items()
+    ]
+
+
+def partner_observations(fetcher: Fetcher, hs: str, year: int) -> list[Observation]:
+    """Annual exports + imports by country for one HS code and year."""
+    obs = []
+    for direction in _DIRS:
+        try:
+            res = fetcher.get(partner_url(direction, hs, year))
+        except RuntimeError:
+            continue
+        obs += parse_partners(res.body.decode("utf-8"), direction=direction, hs=hs,
+                              source=res.source, source_url=res.url,
+                              retrieved_at=res.retrieved_at, licence_class=res.licence_class)
+    return obs
+
+
 def hs_observations(fetcher: Fetcher, hs: str, years) -> list[Observation]:
     obs = []
     for direction in _DIRS:

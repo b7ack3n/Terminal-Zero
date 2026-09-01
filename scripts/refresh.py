@@ -89,6 +89,8 @@ def main() -> None:
     # Trade — monthly, near-current. Recent years; skips months not yet posted.
     if m.hs:
         insert_observations(conn, trade.hs_observations(fetcher, m.hs[0], range(now - 2, now + 1)))
+        # by-country partners for the latest full year
+        insert_observations(conn, trade.partner_observations(fetcher, m.hs[0], now - 1))
         latest = conn.execute("SELECT MAX(period_end) FROM observations WHERE subject_id=?",
                               (f"HS:{m.hs[0]}",)).fetchone()[0]
         report.append(("Trade", latest))

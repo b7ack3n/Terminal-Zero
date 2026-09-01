@@ -17,6 +17,7 @@ import sqlite3
 from terminal_zero import derive, geo, room
 from terminal_zero.bea.io_labels import label as io_label
 from terminal_zero.census.cbp import SIZE_LABELS
+from terminal_zero.census.country_labels import name as country_name
 
 SIZE_ORDER = ["210", "220", "230", "241", "242", "251", "252", "254", "260"]
 LARGE_CODES = {"251", "252", "254", "260"}  # 250+ employees
@@ -168,6 +169,26 @@ def _trade(conn, hs):
     exp_tot = sum(m["exp"] or 0 for m in by_year[year])
     imp_tot = sum(m["imp"] or 0 for m in by_year[year])
     return {"months": months, "year": year, "exports": exp_tot, "imports": imp_tot}
+
+
+def _trade_partners(conn, hs):
+    """Top export destinations and import sources (by country), latest full year."""
+    if not hs:
+        return None
+    subj = f"HS:{hs}"
+    year = conn.execute("SELECT MAX(fiscal_year) FROM observations WHERE subject_id=? AND "
+                        "concept LIKE 'exports_country:%'", (subj,)).fetchone()[0]
+    if not year:
+        return None
+
+    def top(direction):
+        rows = conn.execute(
+            f"SELECT concept, value FROM observations WHERE subject_id=? AND "
+            f"concept LIKE '{direction}_country:%' AND fiscal_year=? ORDER BY value DESC LIMIT 6",
+            (subj, year)).fetchall()
+        return [(country_name(c.split(":", 1)[1]), v) for c, v in rows]
+
+    return {"year": year, "exports": top("exports"), "imports": top("imports")}
 
 
 def _provenance(conn, subject_id):
@@ -442,6 +463,7 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
     nass_data = _nass(conn, nass)
     cbp = _cbp(conn, naics)
     trade = _trade(conn, hs)
+    partners = _trade_partners(conn, hs)
     prov = _provenance(conn, subject)
     retrieved = (prov.get("last") or "")[:10]
 
@@ -574,7 +596,17 @@ def render(conn, naics, title, key_players=None, bea_industry=None, bea_note="",
             f'<b>{_usd_b(trade["exports"])}</b> exports against <b>{_usd_b(trade["imports"])}</b> '
             f'imports ({pen:.1f}× import cover).</p>' +
             ex(f"Monthly exports vs. imports, HS {hs}", _trade_chart(trade["months"]),
-               f"Census international trade. {hs_note}") + "</section>")
+               f"Census international trade. {hs_note}"))
+        if partners and partners["exports"]:
+            dests = ", ".join(f"{n} {_usd_b(v)}" for n, v in partners["exports"][:3])
+            srcs = ", ".join(f"{n} {_usd_b(v)}" for n, v in partners["imports"][:3])
+            section3 += (
+                f'<p class="finding">In {partners["year"]}, top export destinations were '
+                f'<b>{dests}</b>; leading import sources <b>{srcs}</b>.</p>' +
+                ex(f"Top export destinations, {partners['year']}",
+                   _hbars([{"label": n, "value": v} for n, v in partners["exports"]], _usd_b, ""),
+                   "Census international trade, by partner country."))
+        section3 += "</section>"
     else:
         section3 = ("<section>" + _section("03", "Trade exposure",
                     "Export orientation and import competition.") +
