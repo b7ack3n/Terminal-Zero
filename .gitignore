@@ -1,3 +1,7 @@
+# Secrets / local contact info — never commit. Contact lives in the shell env.
+.env
+.env.*
+
 # Raw fetched responses — provenance cache, not source. Regenerable, can get large.
 data/cache/
 
